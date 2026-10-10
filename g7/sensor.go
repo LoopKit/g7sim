@@ -129,7 +129,7 @@ func NewSensor(state *State, path string, timing Timing) *Sensor {
 }
 
 func (s *Sensor) Name() string        { return "DXCM" + s.state.Suffix }
-func (s *Sensor) DeviceName() string  { return "Dexcom" + s.state.Suffix }
+func (s *Sensor) DeviceName() string  { return "DXCM" + s.state.Suffix }
 func (s *Sensor) Serial() uint64      { return s.state.Serial }
 func (s *Sensor) PairingCode() string { return s.state.Code }
 
