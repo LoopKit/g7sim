@@ -144,7 +144,10 @@ func NewRadio(sensor *g7.Sensor, maxConnections int) (*Radio, error) {
 
 func (r *Radio) addServices() {
 	gap := gatt.NewService(gatt.UUID16(0x1800))
-	gap.AddCharacteristic(gatt.UUID16(0x2A00)).SetValue([]byte(r.sensor.DeviceName()))
+	// The GAP device name the app reads after connecting is the same short
+	// name the sensor advertises (DXCMxx). A real G7 does not switch to a
+	// "Dexcomxx" form once connected (Marion, on real hardware, 2026-10).
+	gap.AddCharacteristic(gatt.UUID16(0x2A00)).SetValue([]byte(r.sensor.Name()))
 	gap.AddCharacteristic(gatt.UUID16(0x2A01)).SetValue([]byte{0, 0})
 
 	s := gatt.NewService(cgmService)
