@@ -117,6 +117,9 @@ type Sensor struct {
 }
 
 func NewSensor(state *State, path string, timing Timing) *Sensor {
+	if state.Identity == nil {
+		state.Identity = NewSensorIdentity(state.Serial)
+	}
 	s := &Sensor{
 		Timing:    timing,
 		state:     state,
@@ -126,6 +129,14 @@ func NewSensor(state *State, path string, timing Timing) *Sensor {
 	}
 	s.fillReadings(time.Now())
 	return s
+}
+
+// CertChain is the sensor's X.509 chain for the certificate exchange.
+func (s *Sensor) CertChain() [][]byte { return s.state.Identity.CertChain() }
+
+// SignChallenge signs the display's key-challenge nonce with the sensor leaf.
+func (s *Sensor) SignChallenge(displayNonce []byte) []byte {
+	return s.state.Identity.SignChallenge(displayNonce)
 }
 
 func (s *Sensor) Name() string        { return "DXCM" + s.state.Suffix }

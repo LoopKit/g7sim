@@ -39,11 +39,12 @@ type State struct {
 	SessionLength time.Duration `json:"sessionLength"`
 	Warmup        time.Duration `json:"warmup"`
 
-	Slots       map[byte]*Slot `json:"slots"`
-	Calibration *Calibration   `json:"calibration,omitempty"`
-	CalOffset   float64        `json:"calOffset"`
-	Glucose     GlucoseMode    `json:"glucose"`
-	Readings    []*Reading     `json:"readings"`
+	Slots       map[byte]*Slot  `json:"slots"`
+	Identity    *SensorIdentity `json:"identity,omitempty"`
+	Calibration *Calibration    `json:"calibration,omitempty"`
+	CalOffset   float64         `json:"calOffset"`
+	Glucose     GlucoseMode     `json:"glucose"`
+	Readings    []*Reading      `json:"readings"`
 }
 
 func NewState(serial uint64, code, suffix string, activation time.Time, days int) *State {

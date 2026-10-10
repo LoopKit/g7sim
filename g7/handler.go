@@ -233,6 +233,7 @@ func (h *handler) challenge(msg []byte, fresh bool) bool {
 // MARK: - Certificate exchange (fresh pairing only)
 
 func (h *handler) certificatePhase() bool {
+	chain := h.sensor.CertChain()
 	for {
 		msg, ok := h.waitAuth(handshakeTimeout)
 		if !ok {
@@ -242,20 +243,25 @@ func (h *handler) certificatePhase() bool {
 			log.Printf("%s: expected a certificate request, got %x", h.link.Addr(), msg)
 			return false
 		}
-		index := msg[1]
+		index := int(msg[1])
 		clientCertLen := int(binary.LittleEndian.Uint32(msg[2:6]))
 
 		// A zero-length request is the terminator: acknowledge and stop.
 		if clientCertLen == 0 {
-			h.link.Notify(CharAuth, []byte{opCertificate, 0x00, index, 0x00, 0x00})
+			h.link.Notify(CharAuth, []byte{opCertificate, 0x00, byte(index), 0x00, 0x00})
 			return true
 		}
 
-		// The client does not verify our certificate, only reads its declared
-		// length, so a block of the length we announce is enough.
-		const sensorCertLen = 64
-		h.link.Notify(CharAuth, []byte{opCertificate, 0x00, index, byte(sensorCertLen), byte(sensorCertLen >> 8)})
-		h.notifyCert(randomBytes(sensorCertLen))
+		// Our certificate at this index — the dummy CA at 0, the leaf at 1, as
+		// a real sensor sends them. The acknowledgement declares its length as
+		// a 4-byte little-endian value (the real sensor's 7-byte 0B ack).
+		var cert []byte
+		if index < len(chain) {
+			cert = chain[index]
+		}
+		ack := le32([]byte{opCertificate, 0x00, byte(index)}, uint32(len(cert)))
+		h.link.Notify(CharAuth, ack)
+		h.notifyCert(cert)
 
 		if _, ok := h.waitCert(clientCertLen, handshakeTimeout); !ok {
 			return false
@@ -274,12 +280,30 @@ func (h *handler) keyChallenge() bool {
 		log.Printf("%s: expected the key challenge, got %x", h.link.Addr(), msg)
 		return false
 	}
-	// The client signs bytes [2..18] of this acknowledgement, so it must be at
-	// least 18 bytes. We do not verify the signature it returns.
-	h.link.Notify(CharAuth, append([]byte{opKeyChallenge, 0x00}, randomBytes(16)...))
-	h.notifyCert(randomBytes(64))
-	_, ok = h.waitCert(64, handshakeTimeout)
-	return ok
+	displayNonce := msg[1:17]
+
+	// Our challenge to the display: the 16 bytes it must sign with Dexcom's
+	// display key. The ack is `0C 00 <16 bytes>`, which the client signs.
+	sensorChallenge := randomBytes(16)
+	h.link.Notify(CharAuth, append([]byte{opKeyChallenge, 0x00}, sensorChallenge...))
+
+	// Sign the display's nonce with the sensor leaf key, as a real sensor does.
+	h.notifyCert(h.sensor.SignChallenge(displayNonce))
+
+	// The display answers with its signature over our challenge. Verify it
+	// proves possession of Dexcom's display key — the check a real sensor
+	// makes. Advisory for now (logged, not enforced) so a verification quirk
+	// cannot block pairing.
+	displaySig, ok := h.waitCert(64, handshakeTimeout)
+	if !ok {
+		return false
+	}
+	if VerifyDisplaySignature(sensorChallenge, displaySig) {
+		log.Printf("%s: display authenticated — holds Dexcom's display key", h.link.Addr())
+	} else {
+		log.Printf("%s: display's key-challenge signature did not verify against Dexcom's display key (advisory)", h.link.Addr())
+	}
+	return true
 }
 
 // MARK: - Finalize
