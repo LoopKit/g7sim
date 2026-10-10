@@ -50,6 +50,8 @@ func main() {
 		log.Printf("new sensor")
 	}
 
+	log.Printf("g7sim — for development use only, not a Dexcom product; simulated data only")
+
 	sensor := g7.NewSensor(state, *statePath, g7.MeasuredTiming())
 	log.Printf("%s serial %d pairing code %s, activated %s", sensor.Name(), sensor.Serial(), sensor.PairingCode(), state.Activation.Format(time.RFC3339))
 

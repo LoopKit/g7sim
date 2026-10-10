@@ -4,6 +4,12 @@ A Dexcom G7 sensor emulator for a Raspberry Pi, for exercising G7SensorKit's dir
 connection without a real sensor. Built on the same `paypal/gatt` HCI stack as
 [LoopKit/pod](https://github.com/LoopKit/pod).
 
+> **For development use only — not a Dexcom product.** g7sim is an independent,
+> unofficial tool for testing CGM software. It is not made, endorsed, or supported by
+> Dexcom, Inc., it is not a medical device, and it emits only simulated, made-up data.
+> "Dexcom", "G7", "ONE+" and "Stelo" are trademarks of Dexcom, Inc., used here solely to
+> describe interoperability. Never use it for therapy or any clinical decision.
+
 ## Status
 
 | Part | State |

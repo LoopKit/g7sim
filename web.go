@@ -45,6 +45,7 @@ const indexHTML = `<!doctype html>
   th { color:var(--mut); font-weight:500; }
   .muted { color:var(--mut); font-size:13px; }
   .hidden { display:none; }
+  footer { max-width:760px; margin:0 auto; padding:4px 16px 24px; color:var(--mut); font-size:12px; }
 </style>
 </head>
 <body>
@@ -117,6 +118,7 @@ const indexHTML = `<!doctype html>
     <div class="muted" style="margin-top:6px">Drops every display's key, so the next connection pairs again.</div>
   </div>
 </main>
+<footer>For development use only — not a Dexcom product. This sensor emits simulated, made-up data; never use it for therapy.</footer>
 <script>
 const TYPE = {1:"medical",2:"phone",3:"watch",4:"receiver",5:"pump"};
 const STATE = {2:["warmup","warn"],3:["excess noise","warn"],6:["ok","ok"],7:["needs calibration","warn"],
