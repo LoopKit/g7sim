@@ -40,6 +40,24 @@ The emulator takes over `hci0`, so it cannot run beside the pod simulator on one
 use a USB dongle for the second one. The sensor advertises from a random static address
 derived from its serial, so each `-fresh` sensor is a new peripheral to iOS.
 
+### bluetoothd conflicts for the adapter
+
+The emulator drives `hci0` directly over a raw HCI socket, so the system Bluetooth daemon must
+not be holding the adapter. On older Pi OS (e.g. Raspbian bullseye on a Pi 3/4) it coexists
+fine, but on newer releases (Raspbian trixie, e.g. a Pi Zero W) `bluetoothd` keeps the adapter
+and the emulator fails at start-up with `starting Bluetooth: no supported devices available`.
+Stop (or disable) the daemon first:
+
+```bash
+sudo systemctl stop bluetooth      # or: sudo systemctl disable --now bluetooth
+./g7sim -fresh                     # as root, or with the setcap above
+```
+
+A tidy way to run it as a dedicated appliance is a unit with `Conflicts=bluetooth.service`
+(systemd stops `bluetooth` whenever the emulator starts). The Pi Zero W has no RTC, so make
+sure its clock is NTP-synced before running — the emulator timestamps readings at wall-clock
+time, and a phone will reject readings from a sensor whose clock is off.
+
 ### Web UI
 
 Open `http://<pi>:8080/` for a control panel: the current reading and state, the
