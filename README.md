@@ -21,6 +21,7 @@ connection without a real sensor. Built on the same `paypal/gatt` HCI stack as
 | Key-exchange and challenge crypto (`g7/jpake.go`) | done, tested against a port of the app's client and the app's AES vectors |
 | GATT layout, random static address, HTTP API | done, runs on the Pi |
 | Per-connection protocol handler (`g7/handler.go`) | done, reconnect + session integration-tested; fresh pairing untested against real hardware |
+| iOS Simulator transport (`impossible.go`, via ImpossiBLE) | done; Loop pairs, reads and reconnects in the Simulator |
 
 ## Build and run on the Pi
 
@@ -105,6 +106,43 @@ curl -s -XPOST rpi:8080/new -d '{"model":"stelo","code":"1234","ageMinutes":0}' 
 
 `/new` takes `model`, `days`, `code`, `serial`, `ageMinutes`, `lifetimeHours` and
 `warmupMinutes`; anything omitted picks the same default as the command line.
+
+## Run it for Loop in the iOS Simulator
+
+CoreBluetooth does nothing in the iOS Simulator. [ImpossiBLE](https://github.com/mickeyl/ImpossiBLE)
+replaces it inside the app with shims that speak JSON over the Unix socket `/tmp/impossible.sock`,
+and `-transport impossible` makes g7sim the provider on that socket: no radio, no Pi, no
+Bluetooth permission, so it runs on any Mac, including a CI virtual machine.
+
+```bash
+go build -o g7sim .
+./g7sim -transport impossible -fresh -code 4321 -serial 7810293746
+simulator/build-impossible.sh        # prints the path of libImpossiBLE.dylib
+```
+
+Loop needs no change to use it: ImpossiBLE is injected at launch.
+
+```bash
+SIMCTL_CHILD_DYLD_INSERT_LIBRARIES=/path/to/libImpossiBLE.dylib \
+    xcrun simctl launch <simulator> <Loop's bundle id>
+```
+
+From Xcode, set `DYLD_INSERT_LIBRARIES` to the same path under the Loop scheme's Run →
+Arguments → Environment Variables (a local change; don't commit it). Without the library Loop
+behaves as before in the Simulator: pairing walks through with a stand-in sensor.
+
+Code `4321` and serial `7810293746` are the stand-in applicator G7SensorKit offers in the
+Simulator, so both "scan" and manual code entry find this sensor. ImpossiBLE's menu bar app
+serves the same socket, so quit it first; g7sim refuses to start while another provider is
+live. A provider serves one app at a time, and a newly launched app takes over.
+
+The app sees the sensor's advertising schedule, not a sensor that is always there: it is
+discovered only while it advertises, and a connect waits for the next advert, as iOS's does.
+The protocol, the web UI and the API are the same as on the Pi.
+
+`build-impossible.sh` builds a pinned ImpossiBLE release with
+`simulator/impossible-delegate-queue.patch`, which fixes a state callback delivered on the main
+queue rather than the central's own (G7SensorKit asserts its queue, so Loop crashed at launch).
 
 ## The advertising model
 
@@ -211,6 +249,8 @@ exchange from both ends.
 - The protocol layouts, display-type values and advertisement format are as implemented in
   [LoopKit/G7SensorKit](https://github.com/LoopKit/G7SensorKit), which in turn draws on
   [DexKit](https://github.com/nightscout/DexKit) by Erik Tolboom.
+- The iOS Simulator transport serves the socket protocol of Mickey Lauer's
+  [ImpossiBLE](https://github.com/mickeyl/ImpossiBLE) (MIT), which g7sim does not vendor.
 - The BLE approach follows [LoopKit/pod](https://github.com/LoopKit/pod); the HCI stack is a
   vendored copy of [paypal/gatt](https://github.com/paypal/gatt) under `third_party/gatt`,
   with small fixes noted in the README's library-changes notes.

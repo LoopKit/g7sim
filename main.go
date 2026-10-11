@@ -101,6 +101,8 @@ func main() {
 	warmup := flag.Duration("warmup", 0, "warmup of a new sensor (default: from -days)")
 	maxConn := flag.Int("max-connections", 4, "simultaneous links the controller accepts")
 	api := flag.String("api", ":8080", "HTTP control API address")
+	transport := flag.String("transport", "ble", "ble (a Linux Bluetooth adapter) or impossible (ImpossiBLE's socket, for an app in the iOS Simulator)")
+	socket := flag.String("socket", "/tmp/impossible.sock", "ImpossiBLE socket for -transport impossible")
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	rand.Seed(time.Now().UnixNano())
@@ -144,9 +146,22 @@ func main() {
 		sensor.Name(), sensor.Model(), state.Days, state.Lifetime(), state.Warmup,
 		sensor.Serial(), sensor.PairingCode(), state.Activation.Format(time.RFC3339))
 
-	radio, err := NewRadio(sensor, *maxConn)
-	if err != nil {
-		log.Fatalf("starting Bluetooth: %v", err)
+	var radio radio
+	switch *transport {
+	case "ble":
+		r, err := NewRadio(sensor, *maxConn)
+		if err != nil {
+			log.Fatalf("starting Bluetooth: %v", err)
+		}
+		radio = r
+	case "impossible":
+		r, err := NewSimRadio(sensor, *socket)
+		if err != nil {
+			log.Fatalf("serving %s: %v", *socket, err)
+		}
+		radio = r
+	default:
+		log.Fatalf("transport %q: want ble or impossible", *transport)
 	}
 
 	// replace swaps in a new sensor: it is saved over the state file and the
@@ -163,7 +178,8 @@ func main() {
 			log.Fatalf("restarting: %v", err)
 		}
 		log.Printf("restarting as the new sensor")
-		args := []string{exe, "-state", *statePath, "-api", *api, "-max-connections", strconv.Itoa(*maxConn)}
+		args := []string{exe, "-state", *statePath, "-api", *api, "-max-connections", strconv.Itoa(*maxConn),
+			"-transport", *transport, "-socket", *socket}
 		log.Fatalf("restarting: %v", syscall.Exec(exe, args, os.Environ()))
 	}
 

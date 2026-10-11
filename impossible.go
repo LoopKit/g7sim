@@ -1,0 +1,591 @@
+package main
+
+import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/loopkit/g7sim/g7"
+)
+
+// SimRadio serves the sensor to an app in the iOS Simulator through
+// ImpossiBLE (github.com/mickeyl/ImpossiBLE) instead of a Bluetooth adapter.
+// The app links ImpossiBLE, whose CoreBluetooth shims speak newline-delimited
+// JSON over a Unix socket; g7sim takes the provider's end of that socket, in
+// place of ImpossiBLE's menu bar app. Like that app it serves one client, and
+// a new connection takes over from the old one.
+type SimRadio struct {
+	sensor   *g7.Sensor
+	path     string
+	listener net.Listener
+	id       string // the peripheral identifier the app sees
+	stopped  bool
+
+	mu       sync.Mutex
+	client   *simClient
+	scanning bool
+	pending  bool // the app asked to connect; held until the sensor advertises
+	link     *simLink
+	mode     g7.AdvertMode
+	tried    time.Time // last attempt to bring up a pending connection
+}
+
+type simClient struct {
+	conn   net.Conn
+	addr   string // what the sensor sees as the central's address
+	mu     sync.Mutex
+	closed bool
+}
+
+func (c *simClient) send(msg map[string]interface{}) {
+	b, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("simulator: encoding %v: %v", msg["type"], err)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	c.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c.conn.Write(append(b, '\n')); err != nil {
+		log.Printf("simulator: send %v: %v", msg["type"], err)
+	}
+}
+
+func (c *simClient) close() {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+	c.conn.Close()
+}
+
+// gattChar is one characteristic of the table the app discovers. Those with
+// a protocol role go to the handler; the rest only acknowledge.
+type gattChar struct {
+	uuid  string
+	props int
+	char  g7.Char
+	role  bool
+}
+
+type gattService struct {
+	uuid  string
+	chars []gattChar
+}
+
+const (
+	propWriteNoResponse = 0x04
+	propWrite           = 0x08
+	propNotify          = 0x10
+)
+
+// The same layout as ble.go serves. iOS hides the GAP service from apps.
+var simServices = []gattService{
+	{strings.ToUpper(cgmServiceUUID), []gattChar{
+		{"F8083533-849E-531C-C594-30F1F86A4EA5", propNotify, 0, false},
+		{"F8083534-849E-531C-C594-30F1F86A4EA5", propWrite | propWriteNoResponse | propNotify, g7.CharControl, true},
+		{"F8083535-849E-531C-C594-30F1F86A4EA5", propWrite | propWriteNoResponse | propNotify, g7.CharAuth, true},
+		{"F8083536-849E-531C-C594-30F1F86A4EA5", propWrite | propWriteNoResponse | propNotify, g7.CharBackfill, true},
+		{"F8083538-849E-531C-C594-30F1F86A4EA5", propWrite | propWriteNoResponse | propNotify, g7.CharCertificate, true},
+	}},
+	{"F8084532-849E-531C-C594-30F1F86A4EA5", []gattChar{
+		{"F8084533-849E-531C-C594-30F1F86A4EA5", propWrite | propNotify, 0, false},
+		{"F8084534-849E-531C-C594-30F1F86A4EA5", propWrite | propNotify, 0, false},
+	}},
+}
+
+const (
+	cgmServiceUUID        = "F8083532-849E-531C-C594-30F1F86A4EA5"
+	advertisedServiceUUID = "FEBC"
+)
+
+// peripheralID derives the identifier from the serial, so the app finds the
+// same peripheral again after either side restarts, as it would a real one.
+func peripheralID(serial uint64) string {
+	h := sha256.Sum256([]byte(fmt.Sprintf("g7sim %d", serial)))
+	h[6] = h[6]&0x0f | 0x40
+	h[8] = h[8]&0x3f | 0x80
+	x := strings.ToUpper(hex.EncodeToString(h[:16]))
+	return x[0:8] + "-" + x[8:12] + "-" + x[12:16] + "-" + x[16:20] + "-" + x[20:32]
+}
+
+// centralAddr stands in for the phone's Bluetooth address, which the sensor
+// keys its per-window bookkeeping on. One per app, stable across launches.
+func centralAddr(bundleID string) string {
+	h := sha256.Sum256([]byte(bundleID))
+	return fmt.Sprintf("%02X:%02X:%02X:%02X:%02X:%02X", h[0]|0xC0, h[1], h[2], h[3], h[4], h[5])
+}
+
+func NewSimRadio(sensor *g7.Sensor, path string) (*SimRadio, error) {
+	// A live provider (ImpossiBLE's app, or another g7sim) answers on the
+	// socket; a stale file from one that died does not.
+	if c, err := net.Dial("unix", path); err == nil {
+		c.Close()
+		return nil, fmt.Errorf("%s is served by another provider; quit it (ImpossiBLE's menu bar app?) first", path)
+	}
+	os.Remove(path)
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	r := &SimRadio{sensor: sensor, path: path, listener: l, id: peripheralID(sensor.Serial())}
+	log.Printf("serving the iOS Simulator on %s as peripheral %s", path, r.id)
+	go r.accept()
+	return r, nil
+}
+
+func (r *SimRadio) accept() {
+	for {
+		conn, err := r.listener.Accept()
+		if err != nil {
+			r.mu.Lock()
+			stopped := r.stopped
+			r.mu.Unlock()
+			if !stopped {
+				log.Printf("simulator: accept: %v", err)
+			}
+			return
+		}
+		go r.serve(&simClient{conn: conn})
+	}
+}
+
+func (r *SimRadio) serve(c *simClient) {
+	sc := bufio.NewScanner(c.conn)
+	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		var msg map[string]interface{}
+		if err := json.Unmarshal(sc.Bytes(), &msg); err != nil {
+			log.Printf("simulator: bad message: %v", err)
+			continue
+		}
+		r.handle(c, msg)
+	}
+	r.dropClient(c)
+}
+
+// dropClient forgets everything about an app that went away, as a phone
+// that turns Bluetooth off does: its link closes and its scan stops.
+func (r *SimRadio) dropClient(c *simClient) {
+	r.mu.Lock()
+	if r.client == c {
+		r.client = nil
+		r.scanning = false
+		r.pending = false
+	}
+	l := r.link
+	if l != nil && l.client == c {
+		r.link = nil
+	} else {
+		l = nil
+	}
+	r.mu.Unlock()
+	if l != nil {
+		l.end(false)
+	}
+	c.close()
+}
+
+func str(msg map[string]interface{}, key string) string {
+	s, _ := msg[key].(string)
+	return s
+}
+
+func (r *SimRadio) current(c *simClient) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.client == c
+}
+
+// takeOver makes c the app served, once it has said hello: a connection
+// that never does is a probe (another provider checking for a live socket).
+func (r *SimRadio) takeOver(c *simClient) {
+	r.mu.Lock()
+	old := r.client
+	r.client = c
+	r.mu.Unlock()
+	if old != nil {
+		log.Printf("simulator: a new app connected; dropping the previous one")
+		old.send(map[string]interface{}{"type": "connectionRejected", "code": "clientBusy",
+			"message": "another app connected to g7sim"})
+		r.dropClient(old)
+	}
+}
+
+func (r *SimRadio) handle(c *simClient, msg map[string]interface{}) {
+	t := str(msg, "type")
+	if t == "hello" {
+		c.addr = centralAddr(str(msg, "bundleId"))
+		log.Printf("simulator: %s (ImpossiBLE %s, pid %v) connected as %s",
+			str(msg, "bundleId"), str(msg, "clientVersion"), msg["pid"], c.addr)
+		r.takeOver(c)
+		return
+	}
+	if !r.current(c) {
+		return
+	}
+	id := str(msg, "id")
+	switch t {
+	case "scan":
+		r.mu.Lock()
+		r.scanning = true
+		mode := r.mode
+		r.mu.Unlock()
+		if mode == g7.AdvertFull {
+			r.discovered(c)
+		}
+	case "stopScan":
+		r.mu.Lock()
+		r.scanning = false
+		r.mu.Unlock()
+	case "connect":
+		if id != r.id {
+			c.send(map[string]interface{}{"type": "didFailConnect", "id": id, "error": "unknown peripheral"})
+			return
+		}
+		r.mu.Lock()
+		if r.link == nil {
+			r.pending = true
+			r.tried = time.Time{}
+		}
+		r.mu.Unlock()
+		r.tryConnect(time.Now())
+	case "cancel":
+		r.mu.Lock()
+		r.pending = false
+		l := r.link
+		r.link = nil
+		r.mu.Unlock()
+		if l != nil {
+			l.end(true)
+		} else {
+			c.send(disconnected(id))
+		}
+	case "discoverServices":
+		var services []map[string]interface{}
+		for i, s := range simServices {
+			services = append(services, map[string]interface{}{
+				"id": fmt.Sprintf("%s:%s:%d", r.id, s.uuid, i), "uuid": s.uuid, "primary": true})
+		}
+		c.send(map[string]interface{}{"type": "didDiscoverServices", "id": id, "services": services, "error": ""})
+	case "discoverCharacteristics":
+		serviceID := str(msg, "serviceId")
+		var chars []map[string]interface{}
+		for si, s := range simServices {
+			if serviceID != fmt.Sprintf("%s:%s:%d", r.id, s.uuid, si) {
+				continue
+			}
+			for ci, ch := range s.chars {
+				chars = append(chars, map[string]interface{}{
+					"id": fmt.Sprintf("%s:%s:%d", serviceID, ch.uuid, ci), "uuid": ch.uuid, "properties": ch.props})
+			}
+		}
+		c.send(map[string]interface{}{"type": "didDiscoverCharacteristics", "id": id,
+			"serviceId": serviceID, "characteristics": chars, "error": ""})
+	case "discoverDescriptors":
+		c.send(map[string]interface{}{"type": "didDiscoverDescriptors", "id": id,
+			"characteristicId": str(msg, "characteristicId"), "descriptors": []interface{}{}, "error": ""})
+	case "discoverIncludedServices":
+		c.send(map[string]interface{}{"type": "didDiscoverIncludedServices", "id": id,
+			"serviceId": str(msg, "serviceId"), "includedServices": []interface{}{}, "error": ""})
+	case "read":
+		c.send(map[string]interface{}{"type": "didUpdateValue", "id": id,
+			"characteristicId": str(msg, "characteristicId"), "value": "", "error": ""})
+	case "write":
+		r.write(c, msg)
+	case "setNotify":
+		r.setNotify(c, msg)
+	case "readRSSI":
+		c.send(map[string]interface{}{"type": "didReadRSSI", "id": id, "rssi": -60, "error": ""})
+	case "registerForConnectionEvents":
+	case "setMockConfiguration":
+		c.send(map[string]interface{}{"type": "didSetMockConfiguration", "ok": false,
+			"error": "g7sim serves its own sensor and takes no mock configuration"})
+	case "clearMockConfiguration":
+	case "openL2CAP":
+		c.send(map[string]interface{}{"type": "didOpenL2CAP", "id": id, "channelId": "", "psm": msg["psm"],
+			"error": "g7sim has no L2CAP channels"})
+	default:
+		log.Printf("simulator: ignoring %s", t)
+	}
+}
+
+func disconnected(id string) map[string]interface{} {
+	return map[string]interface{}{"type": "didDisconnect", "id": id, "error": "",
+		"timestamp": float64(time.Now().UnixNano())/1e9 - 978307200, "isReconnecting": false}
+}
+
+// discovered reports the advertisement as a scan sees it.
+func (r *SimRadio) discovered(c *simClient) {
+	crc := g7.SerialChecksum(r.sensor.Serial())
+	mfg := []byte{0xD0, 0x00, byte(crc), byte(crc >> 8), r.sensor.TypesInUse(), 0x04}
+	name := r.sensor.Name()
+	c.send(map[string]interface{}{"type": "didDiscover", "id": r.id, "name": name, "rssi": -60,
+		"adv": map[string]interface{}{
+			"kCBAdvDataLocalName":        name,
+			"kCBAdvDataIsConnectable":    true,
+			"kCBAdvDataServiceUUIDs":     []string{advertisedServiceUUID},
+			"kCBAdvDataManufacturerData": base64.StdEncoding.EncodeToString(mfg),
+		}})
+}
+
+func (r *SimRadio) charFor(charID string) (gattChar, bool) {
+	for si, s := range simServices {
+		prefix := fmt.Sprintf("%s:%s:%d:", r.id, s.uuid, si)
+		if !strings.HasPrefix(charID, prefix) {
+			continue
+		}
+		for ci, ch := range s.chars {
+			if charID == fmt.Sprintf("%s%s:%d", prefix, ch.uuid, ci) {
+				return ch, true
+			}
+		}
+	}
+	return gattChar{}, false
+}
+
+func (r *SimRadio) activeLink(c *simClient) *simLink {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.link != nil && r.link.client == c {
+		return r.link
+	}
+	return nil
+}
+
+func (r *SimRadio) write(c *simClient, msg map[string]interface{}) {
+	id, charID := str(msg, "id"), str(msg, "characteristicId")
+	data, err := base64.StdEncoding.DecodeString(str(msg, "value"))
+	ch, ok := r.charFor(charID)
+	l := r.activeLink(c)
+	reply := map[string]interface{}{"type": "didWriteValue", "id": id, "characteristicId": charID, "error": ""}
+	switch {
+	case err != nil:
+		reply["error"] = "bad value"
+	case !ok:
+		reply["error"] = "unknown characteristic"
+	case l == nil:
+		reply["error"] = "not connected"
+	}
+	if wt, _ := msg["writeType"].(float64); wt == 0 {
+		c.send(reply)
+	}
+	if reply["error"] != "" {
+		return
+	}
+	if !ch.role {
+		log.Printf("%s service B write %s", l.addr, hex.EncodeToString(data))
+		return
+	}
+	l.enqueue(event{char: ch.char, data: data})
+}
+
+func (r *SimRadio) setNotify(c *simClient, msg map[string]interface{}) {
+	id, charID := str(msg, "id"), str(msg, "characteristicId")
+	enabled, _ := msg["enabled"].(bool)
+	if n, ok := msg["enabled"].(float64); ok {
+		enabled = n != 0
+	}
+	ch, ok := r.charFor(charID)
+	l := r.activeLink(c)
+	reply := map[string]interface{}{"type": "didUpdateNotification", "id": id, "characteristicId": charID,
+		"enabled": enabled, "error": ""}
+	if !ok {
+		reply["error"] = "unknown characteristic"
+	} else if l == nil {
+		reply["error"] = "not connected"
+	}
+	if reply["error"] != "" {
+		reply["enabled"] = false
+		c.send(reply)
+		return
+	}
+	if ch.role {
+		l.mu.Lock()
+		if enabled {
+			l.notifying[ch.char] = charID
+		} else {
+			delete(l.notifying, ch.char)
+		}
+		l.mu.Unlock()
+	}
+	c.send(reply)
+	if ch.role && enabled {
+		l.enqueue(event{char: ch.char, subscribed: true})
+	}
+}
+
+// tryConnect brings up a pending connection once the sensor advertises, as
+// iOS completes a pending connect on the next advert it hears. A link the
+// sensor refuses stays pending, as a refusal at the link layer does.
+func (r *SimRadio) tryConnect(now time.Time) {
+	r.mu.Lock()
+	c, mode := r.client, r.mode
+	if !r.pending || c == nil || r.link != nil || mode == g7.AdvertOff || now.Sub(r.tried) < time.Second {
+		r.mu.Unlock()
+		return
+	}
+	r.tried = now
+	r.mu.Unlock()
+
+	if !r.sensor.LinkOpened(c.addr, now, mode) {
+		return
+	}
+	l := &simLink{radio: r, client: c, addr: c.addr, events: make(chan event, 256), notifying: map[g7.Char]string{}}
+	r.mu.Lock()
+	if r.client != c || !r.pending {
+		r.mu.Unlock()
+		r.sensor.LinkClosed(now)
+		return
+	}
+	r.pending = false
+	r.link = l
+	r.mu.Unlock()
+
+	log.Printf("%s connected (advertising %s)", l.addr, mode)
+	c.send(map[string]interface{}{"type": "didConnect", "id": r.id})
+	l.handler = g7.NewHandler(r.sensor, l, mode)
+	go l.run()
+}
+
+func (r *SimRadio) Run() {
+	for range time.Tick(50 * time.Millisecond) {
+		now := time.Now()
+		mode := r.sensor.Tick(now)
+		r.mu.Lock()
+		changed := mode != r.mode
+		r.mode = mode
+		c, scanning := r.client, r.scanning
+		if changed {
+			r.tried = time.Time{}
+		}
+		r.mu.Unlock()
+		if changed {
+			log.Printf("advertising %s (types in use %02x)", mode, r.sensor.TypesInUse())
+			if mode == g7.AdvertFull && scanning && c != nil {
+				r.discovered(c)
+			}
+		}
+		r.tryConnect(now)
+	}
+}
+
+// Stop closes the socket, ending any link; the app sees Bluetooth power off
+// until a provider serves the socket again.
+func (r *SimRadio) Stop() {
+	r.mu.Lock()
+	r.stopped = true
+	r.mu.Unlock()
+	r.listener.Close()
+	r.mu.Lock()
+	c := r.client
+	r.mu.Unlock()
+	if c != nil {
+		r.dropClient(c)
+	}
+	os.Remove(r.path)
+}
+
+// simLink is the app's connection, as the handler sees it.
+type simLink struct {
+	radio   *SimRadio
+	client  *simClient
+	addr    string
+	events  chan event
+	handler g7.Handler
+
+	mu        sync.Mutex
+	notifying map[g7.Char]string // characteristic id by char
+	ended     bool
+}
+
+func (l *simLink) Addr() string { return l.addr }
+
+func (l *simLink) Notify(c g7.Char, b []byte) error {
+	l.mu.Lock()
+	charID, ok := l.notifying[c]
+	ended := l.ended
+	l.mu.Unlock()
+	if ended {
+		return errors.New("link closed")
+	}
+	if !ok {
+		log.Printf("%s %s -> %s dropped: not subscribed", l.addr, c, hex.EncodeToString(b))
+		return errors.New("not subscribed")
+	}
+	log.Printf("%s %s -> %s", l.addr, c, hex.EncodeToString(b))
+	l.client.send(map[string]interface{}{"type": "didUpdateValue", "id": l.radio.id,
+		"characteristicId": charID, "value": base64.StdEncoding.EncodeToString(b), "error": ""})
+	return nil
+}
+
+// Close is the sensor hanging up.
+func (l *simLink) Close() {
+	l.mu.Lock()
+	ended := l.ended
+	l.mu.Unlock()
+	if ended {
+		return
+	}
+	r := l.radio
+	r.mu.Lock()
+	if r.link == l {
+		r.link = nil
+	}
+	r.mu.Unlock()
+	log.Printf("%s: sensor closing the link", l.addr)
+	l.end(true)
+}
+
+func (l *simLink) enqueue(e event) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.ended {
+		return
+	}
+	select {
+	case l.events <- e:
+	default:
+		log.Printf("%s: event queue full, dropping %s write", l.addr, e.char)
+	}
+}
+
+// end tears the link down once, telling the app if it is still there.
+func (l *simLink) end(tell bool) {
+	l.mu.Lock()
+	if l.ended {
+		l.mu.Unlock()
+		return
+	}
+	l.ended = true
+	close(l.events)
+	l.mu.Unlock()
+	log.Printf("%s disconnected", l.addr)
+	l.radio.sensor.LinkClosed(time.Now())
+	if tell {
+		l.client.send(disconnected(l.radio.id))
+	}
+}
+
+func (l *simLink) run() {
+	for e := range l.events {
+		if e.subscribed {
+			l.handler.Subscribed(e.char)
+		} else {
+			l.handler.Write(e.char, e.data)
+		}
+	}
+	l.handler.Closed()
+}

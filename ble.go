@@ -1,3 +1,6 @@
+//go:build linux
+// +build linux
+
 package main
 
 import (
@@ -28,14 +31,6 @@ var (
 	charE             = gatt.MustParseUUID("F8084533-849E-531C-C594-30F1F86A4EA5")
 	charF             = gatt.MustParseUUID("F8084534-849E-531C-C594-30F1F86A4EA5")
 )
-
-// event is one thing that happened on a link, queued so its handler sees
-// them in order and the gatt read loop never blocks on protocol work.
-type event struct {
-	char       g7.Char
-	data       []byte
-	subscribed bool
-}
 
 type link struct {
 	central gatt.Central
