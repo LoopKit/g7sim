@@ -51,6 +51,7 @@ const indexHTML = `<!doctype html>
 <body>
 <header>
   <h1 id="name">G7 sensor</h1>
+  <span class="meta" id="model"></span>
   <span class="meta" id="serial"></span>
   <span class="meta" id="code"></span>
   <span class="meta" id="age"></span>
@@ -174,6 +175,7 @@ document.getElementById('forget').onclick = async()=>{ await fetch('/forget',{me
 async function refresh(){
   let s; try { s = await (await fetch('/status')).json(); } catch(e){ return; }
   document.getElementById('name').textContent = s.name || 'G7 sensor';
+  document.getElementById('model').textContent = ({g7:'G7',oneplus:'ONE+',stelo:'Stelo'}[s.model]||s.model)+' · '+s.days+' day';
   document.getElementById('serial').textContent = 'serial '+s.serial;
   document.getElementById('code').textContent = 'code '+s.code;
   document.getElementById('age').textContent = s.activation ? 'activated '+ago(s.activation) : '';

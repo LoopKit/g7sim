@@ -139,7 +139,7 @@ func (s *Sensor) SignChallenge(displayNonce []byte) []byte {
 	return s.state.Identity.SignChallenge(displayNonce)
 }
 
-func (s *Sensor) Name() string        { return "DXCM" + s.state.Suffix }
+func (s *Sensor) Name() string        { return Models[s.Model()] + s.state.Suffix }
 func (s *Sensor) Serial() uint64      { return s.state.Serial }
 func (s *Sensor) PairingCode() string { return s.state.Code }
 
@@ -470,6 +470,13 @@ func (s *Sensor) Versions() (sessionLength uint32, warmup uint16) {
 	return uint32(s.state.SessionLength / time.Second), uint16(s.state.Warmup / time.Second)
 }
 
+func (s *Sensor) Model() string {
+	if _, ok := Models[s.state.Model]; ok {
+		return s.state.Model
+	}
+	return "g7"
+}
+
 // Status is the snapshot served by the HTTP API.
 func (s *Sensor) Status() map[string]interface{} {
 	s.mu.Lock()
@@ -483,6 +490,7 @@ func (s *Sensor) Status() map[string]interface{} {
 	}
 	out := map[string]interface{}{
 		"name": s.Name(), "serial": s.state.Serial, "code": s.state.Code,
+		"model": s.Model(), "days": s.state.NominalDays(),
 		"activation": s.state.Activation, "slots": slots,
 		"glucoseMode": s.glucose.Describe(),
 	}

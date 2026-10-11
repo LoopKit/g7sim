@@ -17,7 +17,7 @@ func newTestSensor(t *testing.T) (*Sensor, time.Time) {
 	// Activated 2 h ago on a whole minute, so window 24 starts at the
 	// activation plus two hours.
 	activation := time.Now().Truncate(time.Minute).Add(-2 * time.Hour)
-	state := NewState(123456789, "1234", "zz", activation, 10)
+	state := NewState(123456789, "1234", "g7", "zz", activation, 10)
 	s := NewSensor(state, filepath.Join(dir, "state.json"), MeasuredTiming())
 	return s, activation
 }
@@ -187,10 +187,32 @@ func TestReadingsAndBackfill(t *testing.T) {
 }
 
 func TestWarmup(t *testing.T) {
-	state := NewState(1, "1234", "zz", time.Now().Add(-10*time.Minute), 10)
+	state := NewState(1, "1234", "g7", "zz", time.Now().Add(-10*time.Minute), 10)
 	s := NewSensor(state, filepath.Join(os.TempDir(), "g7sim-warmup.json"), MeasuredTiming())
 	r, _ := s.Latest()
 	if r.State != algoWarmup || r.Glucose != nil {
 		t.Fatalf("reading in warmup: %v", r)
+	}
+}
+
+func TestModelNamesAndSessionLength(t *testing.T) {
+	cases := []struct {
+		model, name string
+		days        int
+	}{
+		{"g7", "DXCMzz", 10},
+		{"oneplus", "DX02zz", 10},
+		{"stelo", "DX01zz", 15},
+		{"", "DXCMzz", 10}, // state files from before -model
+	}
+	for _, c := range cases {
+		state := NewState(1, "1234", c.model, "zz", time.Now(), c.days)
+		s := NewSensor(state, filepath.Join(t.TempDir(), "state.json"), MeasuredTiming())
+		if got := s.Name(); got != c.name {
+			t.Errorf("model %q: name %s, want %s", c.model, got, c.name)
+		}
+		if got := state.NominalDays(); got != c.days {
+			t.Errorf("model %q: %d days, want %d", c.model, got, c.days)
+		}
 	}
 }

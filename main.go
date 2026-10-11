@@ -17,11 +17,25 @@ func main() {
 	code := flag.String("code", "", "pairing code for a new sensor (default: random)")
 	serial := flag.Uint64("serial", 0, "serial for a new sensor (default: random)")
 	age := flag.Duration("age", 2*time.Hour, "how long ago a new sensor was activated; 0 starts in warmup")
-	days := flag.Int("days", 10, "session length of a new sensor: 10 or 15")
+	model := flag.String("model", "g7", "model of a new sensor: g7 (DXCM), oneplus (DX02) or stelo (DX01)")
+	days := flag.Int("days", 0, "session length of a new sensor: 10 or 15 (default: 15 for stelo, else 10)")
 	maxConn := flag.Int("max-connections", 4, "simultaneous links the controller accepts")
 	api := flag.String("api", ":8080", "HTTP control API address")
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
+
+	if _, ok := g7.Models[*model]; !ok {
+		log.Fatalf("-model %q: want g7, oneplus or stelo", *model)
+	}
+	if *days == 0 {
+		*days = 10
+		if *model == "stelo" {
+			*days = 15
+		}
+	}
+	if *days != 10 && *days != 15 {
+		log.Fatalf("-days %d: want 10 or 15", *days)
+	}
 
 	var state *g7.State
 	if !*fresh {
@@ -43,7 +57,7 @@ func main() {
 		// always presents as the same sensor (name and BLE address) even after
 		// the state file is lost and recreated.
 		suffix := fmt.Sprintf("%c%c", 'a'+byte((*serial/26)%26), 'a'+byte(*serial%26))
-		state = g7.NewState(*serial, *code, suffix, time.Now().Add(-*age), *days)
+		state = g7.NewState(*serial, *code, *model, suffix, time.Now().Add(-*age), *days)
 		if err := state.Save(*statePath); err != nil {
 			log.Fatalf("saving %s: %v", *statePath, err)
 		}
@@ -53,7 +67,7 @@ func main() {
 	log.Printf("g7sim — for development use only, not a Dexcom product; simulated data only")
 
 	sensor := g7.NewSensor(state, *statePath, g7.MeasuredTiming())
-	log.Printf("%s serial %d pairing code %s, activated %s", sensor.Name(), sensor.Serial(), sensor.PairingCode(), state.Activation.Format(time.RFC3339))
+	log.Printf("%s (%s, %d day) serial %d pairing code %s, activated %s", sensor.Name(), sensor.Model(), state.NominalDays(), sensor.Serial(), sensor.PairingCode(), state.Activation.Format(time.RFC3339))
 
 	radio, err := NewRadio(sensor, *maxConn)
 	if err != nil {

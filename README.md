@@ -34,7 +34,12 @@ sudo setcap 'cap_net_raw,cap_net_admin=eip' ./g7sim
 ./g7sim                       # restore the sensor in g7state.json
 ./g7sim -fresh -age 0         # new sensor in warmup
 ./g7sim -fresh -code 1234 -serial 123456789012 -days 15
+./g7sim -fresh -model stelo   # a Stelo (DX01xx); also oneplus (DX02xx), default g7 (DXCMxx)
 ```
+
+`-model` sets the advertised name prefix, the only thing G7SensorKit uses to tell the models
+apart. `-days` is 10 or 15 and defaults to 15 for Stelo and 10 otherwise. Both are fixed when a
+sensor is created with `-fresh`; the web UI shows them.
 
 The emulator takes over `hci0`, so it cannot run beside the pod simulator on one adapter;
 use a USB dongle for the second one. The sensor advertises from a random static address

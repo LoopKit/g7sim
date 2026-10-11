@@ -31,9 +31,14 @@ func (r *Reading) String() string {
 
 const keptReadings = 24 * 12
 
+// Models are the G7-family sensors and the name prefix each advertises.
+// They share the protocol; G7SensorKit tells them apart by prefix alone.
+var Models = map[string]string{"g7": "DXCM", "oneplus": "DX02", "stelo": "DX01"}
+
 type State struct {
 	Serial        uint64        `json:"serial"`
 	Code          string        `json:"code"`
+	Model         string        `json:"model,omitempty"` // empty in older state files: g7
 	Suffix        string        `json:"suffix"`
 	Activation    time.Time     `json:"activation"`
 	SessionLength time.Duration `json:"sessionLength"`
@@ -47,10 +52,11 @@ type State struct {
 	Readings    []*Reading      `json:"readings"`
 }
 
-func NewState(serial uint64, code, suffix string, activation time.Time, days int) *State {
+func NewState(serial uint64, code, model, suffix string, activation time.Time, days int) *State {
 	s := &State{
 		Serial:     serial,
 		Code:       code,
+		Model:      model,
 		Suffix:     suffix,
 		Activation: activation,
 		Slots:      map[byte]*Slot{},
@@ -64,6 +70,11 @@ func NewState(serial uint64, code, suffix string, activation time.Time, days int
 		s.SessionLength, s.Warmup = 907200*time.Second, 1620*time.Second
 	}
 	return s
+}
+
+// NominalDays is the session length printed on the box: 10 or 15.
+func (s *State) NominalDays() int {
+	return int((s.SessionLength - 12*time.Hour) / (24 * time.Hour))
 }
 
 func LoadState(path string) (*State, error) {
