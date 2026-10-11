@@ -1,6 +1,7 @@
 package g7
 
 import (
+	"encoding/hex"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -211,8 +212,21 @@ func TestModelNamesAndSessionLength(t *testing.T) {
 		if got := s.Name(); got != c.name {
 			t.Errorf("model %q: name %s, want %s", c.model, got, c.name)
 		}
-		if got := state.NominalDays(); got != c.days {
-			t.Errorf("model %q: %d days, want %d", c.model, got, c.days)
+		if got := state.Lifetime(); got != time.Duration(c.days)*24*time.Hour {
+			t.Errorf("model %q: lifetime %v, want %d days", c.model, got, c.days)
+		}
+	}
+}
+
+// The 52 replies must match those captured from real 10- and 15-day sensors.
+func TestExtendedVersionMatchesCaptures(t *testing.T) {
+	for days, want := range map[int]string{
+		10: "5200c0d70d00540600020404ff0c00",
+		15: "5200406f1400880e00010a04ff1100",
+	} {
+		got := hex.EncodeToString(ExtendedVersionMessage(NewState(1, "1234", "g7", "zz", time.Now(), days)))
+		if got != want {
+			t.Errorf("%d-day: %s, want %s", days, got, want)
 		}
 	}
 }

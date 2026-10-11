@@ -27,7 +27,7 @@ const indexHTML = `<!doctype html>
   .state.warn { background:rgba(224,165,59,.18); color:var(--warn); }
   .state.bad { background:rgba(226,87,76,.18); color:var(--bad); }
   label { display:block; font-size:13px; color:var(--mut); margin:10px 0 4px; }
-  input[type=number], select { width:100%; padding:8px; background:#14161a; border:1px solid var(--line); border-radius:7px; color:var(--fg); font-size:15px; }
+  input[type=number], input[type=text], select { width:100%; padding:8px; background:#14161a; border:1px solid var(--line); border-radius:7px; color:var(--fg); font-size:15px; }
   input[type=range] { width:100%; }
   .row { display:flex; gap:12px; flex-wrap:wrap; }
   .row > div { flex:1; min-width:120px; }
@@ -118,6 +118,30 @@ const indexHTML = `<!doctype html>
     <div style="margin-top:14px"><button class="danger" id="forget">Forget all keys</button></div>
     <div class="muted" style="margin-top:6px">Drops every display's key, so the next connection pairs again.</div>
   </div>
+
+  <div class="card">
+    <h2>Start a new sensor</h2>
+    <div class="row">
+      <div><label>Model</label><select id="nsModel">
+        <option value="g7">G7 (DXCM)</option><option value="oneplus">ONE+ (DX02)</option><option value="stelo">Stelo (DX01)</option>
+      </select></div>
+      <div><label>Preset</label><select id="nsDays"><option value="10">10 day</option><option value="15">15 day</option></select></div>
+    </div>
+    <div class="row">
+      <div><label>Lifetime (hours, before the 12 h grace)</label><input type="number" id="nsLifetime" min="1" step="1"></div>
+      <div><label>Warmup (minutes)</label><input type="number" id="nsWarmup" min="0" max="1092" step="1"></div>
+    </div>
+    <div class="row">
+      <div><label>Activated (minutes ago; 0 starts warmup)</label><input type="number" id="nsAge" min="0" step="1" value="120"></div>
+      <div><label>Pairing code</label><input type="text" id="nsCode" inputmode="numeric" maxlength="4" placeholder="random"></div>
+      <div><label>Serial</label><input type="text" id="nsSerial" inputmode="numeric" placeholder="random"></div>
+    </div>
+    <div style="margin-top:14px; display:flex; align-items:center; gap:12px">
+      <button class="danger" id="nsStart">Start new sensor</button>
+      <span class="muted" id="nsMsg"></span>
+    </div>
+    <div class="muted" style="margin-top:6px">Replaces this sensor and restarts the emulator; a phone paired to it must pair the new one. Lifetime and warmup default to the preset.</div>
+  </div>
 </main>
 <footer>For development use only — not a Dexcom product. This sensor emits simulated, made-up data; never use it for therapy.</footer>
 <script>
@@ -175,7 +199,9 @@ document.getElementById('forget').onclick = async()=>{ await fetch('/forget',{me
 async function refresh(){
   let s; try { s = await (await fetch('/status')).json(); } catch(e){ return; }
   document.getElementById('name').textContent = s.name || 'G7 sensor';
-  document.getElementById('model').textContent = ({g7:'G7',oneplus:'ONE+',stelo:'Stelo'}[s.model]||s.model)+' · '+s.days+' day';
+  const h = s.lifetimeHours;
+  document.getElementById('model').textContent = ({g7:'G7',oneplus:'ONE+',stelo:'Stelo'}[s.model]||s.model)+' · '
+    +(h%24===0 ? h/24+' day' : h+' h')+' · warmup '+Math.round(s.warmupMinutes)+' min';
   document.getElementById('serial').textContent = 'serial '+s.serial;
   document.getElementById('code').textContent = 'code '+s.code;
   document.getElementById('age').textContent = s.activation ? 'activated '+ago(s.activation) : '';
@@ -204,6 +230,29 @@ async function refresh(){
     return '<tr><td>'+(TYPE[k]||k)+'</td><td>'+(sl.held?'yes':'no')+'</td><td>'+ago(sl.lastSeen)+'</td><td>'+sl.misses+'</td></tr>';}).join('')
     : '<tr><td colspan="4" class="muted">none yet</td></tr>';
 }
+const PRESET = {10:{lifetime:240, warmup:27}, 15:{lifetime:360, warmup:62}};
+const field = id=>document.getElementById(id);
+function showPreset(){ const p = PRESET[field('nsDays').value];
+  field('nsLifetime').placeholder = p.lifetime; field('nsWarmup').placeholder = p.warmup; }
+field('nsModel').onchange = e=>{ field('nsDays').value = e.target.value==='stelo' ? '15' : '10'; showPreset(); };
+field('nsDays').onchange = showPreset;
+field('nsStart').onclick = async()=>{
+  const v = id=>field(id).value.trim();
+  const num = id=>v(id)==='' ? undefined : +v(id);
+  const body = { model:v('nsModel'), days:+v('nsDays'), code:v('nsCode'), serial:num('nsSerial')||0,
+    ageMinutes:num('nsAge'), lifetimeHours:num('nsLifetime'), warmupMinutes:num('nsWarmup') };
+  if(!confirm('Replace '+field('name').textContent+' with a new sensor?')) return;
+  const msg = field('nsMsg'); msg.textContent = 'Starting…';
+  try {
+    const r = await fetch('/new',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const t = await r.text();
+    if(!r.ok) throw new Error(t.trim());
+    const n = JSON.parse(t);
+    msg.textContent = 'Restarting as '+n.name+', code '+n.code+'…';
+    setTimeout(()=>{ if(msg.textContent.startsWith('Restarting')) msg.textContent=''; }, 15000);
+  } catch(e){ msg.textContent = 'Failed — '+e.message; }
+};
+showPreset();
 setKind('sine'); refresh(); setInterval(refresh, 2000);
 </script>
 </body>

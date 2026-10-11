@@ -1,6 +1,9 @@
 package g7
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"time"
+)
 
 const (
 	opAuthChallengeTx = 0x02
@@ -83,12 +86,13 @@ func (r *Reading) flags() byte {
 	return f
 }
 
-func ExtendedVersionMessage(sessionLength uint32, warmup uint16) []byte {
+func ExtendedVersionMessage(s *State) []byte {
 	b := []byte{opExtendedVersion, 0x00}
-	b = le32(b, sessionLength)
-	b = le16(b, warmup)
-	b = append(b, 0x00, 0x01, 0x0a, 0x04, 0xff)
-	return le16(b, 0x0011)
+	b = le32(b, uint32(s.SessionLength/time.Second))
+	b = le16(b, uint16(s.Warmup/time.Second))
+	b = le32(b, s.Algorithm)
+	b = append(b, 0xff) // hardware version
+	return le16(b, s.MaxLifetimeDays)
 }
 
 func TransmitterVersionMessage(serial uint64) []byte {

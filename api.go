@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/loopkit/g7sim/g7"
 )
@@ -16,7 +17,11 @@ import (
 //	               {"kind":"walk","value":140}
 //	               add "algorithmState":18 to simulate a sensor issue
 //	POST /forget                 drop every display's key
-func serveAPI(addr string, sensor *g7.Sensor) {
+//	POST /new      {"model":"stelo","days":15,"code":"1234","serial":0,
+//	                "ageMinutes":120,"lifetimeHours":360,"warmupMinutes":62}
+//	               replace this sensor with a new one and restart; omitted
+//	               fields pick defaults
+func serveAPI(addr string, sensor *g7.Sensor, replace func(*g7.State)) {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -50,6 +55,29 @@ func serveAPI(addr string, sensor *g7.Sensor) {
 		sensor.ForgetSlots()
 		log.Printf("forgot every display's key")
 		writeJSON(w, sensor.Status())
+	})
+	http.HandleFunc("/new", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST a new sensor", http.StatusMethodNotAllowed)
+			return
+		}
+		var c sensorConfig
+		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
+			http.Error(w, "bad sensor config: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		next, err := newState(c)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		log.Printf("replacing %s with a new %s sensor, code %s", sensor.Name(), next.Model, next.Code)
+		writeJSON(w, map[string]interface{}{"name": g7.Models[next.Model] + next.Suffix, "code": next.Code, "serial": next.Serial})
+		// Let the response go out before the restart drops the listener.
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			replace(next)
+		}()
 	})
 	log.Printf("API on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))

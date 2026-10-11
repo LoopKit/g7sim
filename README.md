@@ -35,11 +35,15 @@ sudo setcap 'cap_net_raw,cap_net_admin=eip' ./g7sim
 ./g7sim -fresh -age 0         # new sensor in warmup
 ./g7sim -fresh -code 1234 -serial 123456789012 -days 15
 ./g7sim -fresh -model stelo   # a Stelo (DX01xx); also oneplus (DX02xx), default g7 (DXCMxx)
+./g7sim -fresh -age 0 -lifetime 36h -warmup 5m   # short session, to exercise warmup and expiry
 ```
 
 `-model` sets the advertised name prefix, the only thing G7SensorKit uses to tell the models
-apart. `-days` is 10 or 15 and defaults to 15 for Stelo and 10 otherwise. Both are fixed when a
-sensor is created with `-fresh`; the web UI shows them.
+apart. `-days` picks the 10- or 15-day preset (15 for Stelo, 10 otherwise): the session length,
+warmup, algorithm version and maximum lifetime that a real sensor of that kind reports in its
+version reply. `-lifetime` (before the 12-hour grace period) and `-warmup` override the preset's
+lengths. All of these are fixed when a sensor is created; to change them, start a new sensor
+with `-fresh` or from the web UI.
 
 The emulator takes over `hci0`, so it cannot run beside the pod simulator on one adapter;
 use a USB dongle for the second one. The sensor advertises from a random static address
@@ -78,7 +82,11 @@ a no-op for it.
 
 Open `http://<pi>:8080/` for a control panel: the current reading and state, the
 glucose model (fixed / sine / random walk), a dropdown to make the sensor report any
-algorithm state or error, the display slots, and a button to forget all keys. It is
+algorithm state or error, the display slots, and a button to forget all keys. **Start a new
+sensor** replaces the sensor with one built from the form (model, preset, lifetime, warmup,
+activation age, code, serial; blanks pick defaults): the emulator saves it over the state file
+and re-executes itself, so the new sensor comes up exactly as from a fresh launch, with its own
+name and address. A phone paired to the old sensor must pair the new one. The page is
 self-contained and polls the JSON API below, so it needs no internet on the Pi.
 
 ![The web control panel](docs/screenshot.png)
@@ -92,7 +100,11 @@ curl -s -XPOST rpi:8080/glucose -d '{"kind":"sine","value":120,"amplitude":50,"p
 curl -s -XPOST rpi:8080/glucose -d '{"kind":"walk","value":140}'
 curl -s -XPOST rpi:8080/glucose -d '{"kind":"fixed","value":120,"algorithmState":18}'
 curl -s -XPOST rpi:8080/forget          # drop every display's key
+curl -s -XPOST rpi:8080/new -d '{"model":"stelo","code":"1234","ageMinutes":0}'   # new sensor, then restart
 ```
+
+`/new` takes `model`, `days`, `code`, `serial`, `ageMinutes`, `lifetimeHours` and
+`warmupMinutes`; anything omitted picks the same default as the command line.
 
 ## The advertising model
 
@@ -178,7 +190,7 @@ noise, so the client's own verification fails and it re-pairs with the code. On 
 | Latest reading and the sensor clock | `sensor.Latest()` → `GlucoseMessage(r, now)` |
 | Readings in a range | `sensor.Backfill(start, end)` → `BackfillRecord(r)` |
 | Calibration | `sensor.Calibrate(glucose, at, type)`, `sensor.CalibrationBounds()` |
-| Version replies | `sensor.Versions()`, `TransmitterVersionMessage(sensor.Serial())` |
+| Version replies | `sensor.ExtendedVersion()`, `TransmitterVersionMessage(sensor.Serial())` |
 
 ### Testing it
 

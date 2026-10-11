@@ -35,14 +35,38 @@ const keptReadings = 24 * 12
 // They share the protocol; G7SensorKit tells them apart by prefix alone.
 var Models = map[string]string{"g7": "DXCM", "oneplus": "DX02", "stelo": "DX01"}
 
+// GracePeriod is how long a sensor keeps reading past its rated lifetime.
+// The session length in the 52 reply includes it.
+const GracePeriod = 12 * time.Hour
+
+// Preset is what a real 10- or 15-day sensor reports in its 52 reply.
+type Preset struct {
+	SessionLength   time.Duration
+	Warmup          time.Duration
+	Algorithm       uint32
+	MaxLifetimeDays uint16
+}
+
+// Presets are from captured 52 replies:
+//
+//	10-day: 52 00 c0d70d00 5406 00020404 ff 0c00
+//	15-day: 52 00 406f1400 880e 00010a04 ff 1100
+var Presets = map[int]Preset{
+	10: {907200 * time.Second, 1620 * time.Second, 0x04040200, 12},
+	15: {1339200 * time.Second, 3720 * time.Second, 0x040a0100, 17},
+}
+
 type State struct {
-	Serial        uint64        `json:"serial"`
-	Code          string        `json:"code"`
-	Model         string        `json:"model,omitempty"` // empty in older state files: g7
-	Suffix        string        `json:"suffix"`
-	Activation    time.Time     `json:"activation"`
-	SessionLength time.Duration `json:"sessionLength"`
-	Warmup        time.Duration `json:"warmup"`
+	Serial          uint64        `json:"serial"`
+	Code            string        `json:"code"`
+	Model           string        `json:"model,omitempty"` // empty in older state files: g7
+	Suffix          string        `json:"suffix"`
+	Activation      time.Time     `json:"activation"`
+	Days            int           `json:"days,omitempty"`
+	SessionLength   time.Duration `json:"sessionLength"`
+	Warmup          time.Duration `json:"warmup"`
+	Algorithm       uint32        `json:"algorithm,omitempty"`
+	MaxLifetimeDays uint16        `json:"maxLifetimeDays,omitempty"`
 
 	Slots       map[byte]*Slot  `json:"slots"`
 	Identity    *SensorIdentity `json:"identity,omitempty"`
@@ -62,19 +86,23 @@ func NewState(serial uint64, code, model, suffix string, activation time.Time, d
 		Slots:      map[byte]*Slot{},
 		Glucose:    GlucoseMode{Kind: "sine", Value: 120, Amplitude: 50, PeriodMinutes: 240},
 	}
-	// The lengths a real sensor reports in its 52 reply; each includes the
-	// 12-hour grace period.
-	if days == 15 {
-		s.SessionLength, s.Warmup = 1339200*time.Second, 3720*time.Second
-	} else {
-		s.SessionLength, s.Warmup = 907200*time.Second, 1620*time.Second
-	}
+	s.applyPreset(days)
 	return s
 }
 
-// NominalDays is the session length printed on the box: 10 or 15.
-func (s *State) NominalDays() int {
-	return int((s.SessionLength - 12*time.Hour) / (24 * time.Hour))
+func (s *State) applyPreset(days int) {
+	if _, ok := Presets[days]; !ok {
+		days = 10
+	}
+	p := Presets[days]
+	s.Days = days
+	s.SessionLength, s.Warmup = p.SessionLength, p.Warmup
+	s.Algorithm, s.MaxLifetimeDays = p.Algorithm, p.MaxLifetimeDays
+}
+
+// Lifetime is the rated wear time, before the grace period.
+func (s *State) Lifetime() time.Duration {
+	return s.SessionLength - GracePeriod
 }
 
 func LoadState(path string) (*State, error) {
@@ -88,6 +116,16 @@ func LoadState(path string) (*State, error) {
 	}
 	if s.Slots == nil {
 		s.Slots = map[byte]*Slot{}
+	}
+	// Files from before presets were stored: infer one, keeping the lengths.
+	if s.Algorithm == 0 {
+		days := 10
+		if s.SessionLength >= Presets[15].SessionLength {
+			days = 15
+		}
+		sessionLength, warmup := s.SessionLength, s.Warmup
+		s.applyPreset(days)
+		s.SessionLength, s.Warmup = sessionLength, warmup
 	}
 	return s, nil
 }

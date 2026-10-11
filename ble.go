@@ -252,6 +252,19 @@ func (r *Radio) advertisement(mode g7.AdvertMode, types byte) *gatt.AdvPacket {
 }
 
 // Run drives the advertiser from the sensor's schedule.
+// Stop releases the adapter, closing every link. gatt.Device does not
+// declare Stop, but the Linux device has it.
+func (r *Radio) Stop() {
+	d, ok := r.device.(interface{ Stop() error })
+	if !ok {
+		log.Printf("stopping adapter: not supported")
+		return
+	}
+	if err := d.Stop(); err != nil {
+		log.Printf("stopping adapter: %v", err)
+	}
+}
+
 func (r *Radio) Run() {
 	for range time.Tick(50 * time.Millisecond) {
 		mode := r.sensor.Tick(time.Now())

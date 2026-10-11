@@ -6,10 +6,88 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"regexp"
+	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/loopkit/g7sim/g7"
 )
+
+// sensorConfig describes a new sensor. Zero values pick defaults; the
+// lifetime and warmup default to the 10- or 15-day preset.
+type sensorConfig struct {
+	Model         string   `json:"model"`
+	Days          int      `json:"days"`
+	Code          string   `json:"code"`
+	Serial        uint64   `json:"serial"`
+	AgeMinutes    *float64 `json:"ageMinutes"`
+	LifetimeHours *float64 `json:"lifetimeHours"`
+	WarmupMinutes *float64 `json:"warmupMinutes"`
+}
+
+var codePattern = regexp.MustCompile(`^[0-9]{4}$`)
+
+func newState(c sensorConfig) (*g7.State, error) {
+	if c.Model == "" {
+		c.Model = "g7"
+	}
+	if _, ok := g7.Models[c.Model]; !ok {
+		return nil, fmt.Errorf("model %q: want g7, oneplus or stelo", c.Model)
+	}
+	if c.Days == 0 {
+		c.Days = 10
+		if c.Model == "stelo" {
+			c.Days = 15
+		}
+	}
+	if _, ok := g7.Presets[c.Days]; !ok {
+		return nil, fmt.Errorf("days %d: want 10 or 15", c.Days)
+	}
+	if c.Code == "" {
+		c.Code = fmt.Sprintf("%04d", rand.Intn(10000))
+	}
+	if !codePattern.MatchString(c.Code) {
+		return nil, fmt.Errorf("code %q: want 4 digits", c.Code)
+	}
+	if c.Serial == 0 {
+		c.Serial = 3000000000 + uint64(rand.Int63n(999999999))
+	}
+	age := 2 * time.Hour
+	if c.AgeMinutes != nil {
+		age = minutes(*c.AgeMinutes)
+	}
+	if age < 0 {
+		return nil, fmt.Errorf("age %v: must not be negative", age)
+	}
+
+	// Derive the two-letter name suffix from the serial, so a given serial
+	// always presents as the same sensor (name and BLE address) even after
+	// the state file is lost and recreated.
+	suffix := fmt.Sprintf("%c%c", 'a'+byte((c.Serial/26)%26), 'a'+byte(c.Serial%26))
+	s := g7.NewState(c.Serial, c.Code, c.Model, suffix, time.Now().Add(-age), c.Days)
+
+	if c.LifetimeHours != nil {
+		lifetime := time.Duration(*c.LifetimeHours * float64(time.Hour))
+		if lifetime <= 0 {
+			return nil, fmt.Errorf("lifetime %v: must be positive", lifetime)
+		}
+		s.SessionLength = lifetime + g7.GracePeriod
+	}
+	if c.WarmupMinutes != nil {
+		s.Warmup = minutes(*c.WarmupMinutes)
+	}
+	// The 52 reply carries warmup as 16-bit seconds.
+	if s.Warmup < 0 || s.Warmup > 0xffff*time.Second {
+		return nil, fmt.Errorf("warmup %v: want 0 to 1092 minutes", s.Warmup)
+	}
+	if s.Warmup >= s.Lifetime() {
+		return nil, fmt.Errorf("warmup %v must be shorter than the lifetime %v", s.Warmup, s.Lifetime())
+	}
+	return s, nil
+}
+
+func minutes(m float64) time.Duration { return time.Duration(m * float64(time.Minute)) }
 
 func main() {
 	statePath := flag.String("state", "g7state.json", "sensor state file")
@@ -18,24 +96,14 @@ func main() {
 	serial := flag.Uint64("serial", 0, "serial for a new sensor (default: random)")
 	age := flag.Duration("age", 2*time.Hour, "how long ago a new sensor was activated; 0 starts in warmup")
 	model := flag.String("model", "g7", "model of a new sensor: g7 (DXCM), oneplus (DX02) or stelo (DX01)")
-	days := flag.Int("days", 0, "session length of a new sensor: 10 or 15 (default: 15 for stelo, else 10)")
+	days := flag.Int("days", 0, "10- or 15-day preset for a new sensor (default: 15 for stelo, else 10)")
+	lifetime := flag.Duration("lifetime", 0, "rated lifetime of a new sensor, before the 12 h grace period (default: from -days)")
+	warmup := flag.Duration("warmup", 0, "warmup of a new sensor (default: from -days)")
 	maxConn := flag.Int("max-connections", 4, "simultaneous links the controller accepts")
 	api := flag.String("api", ":8080", "HTTP control API address")
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
-
-	if _, ok := g7.Models[*model]; !ok {
-		log.Fatalf("-model %q: want g7, oneplus or stelo", *model)
-	}
-	if *days == 0 {
-		*days = 10
-		if *model == "stelo" {
-			*days = 15
-		}
-	}
-	if *days != 10 && *days != 15 {
-		log.Fatalf("-days %d: want 10 or 15", *days)
-	}
+	rand.Seed(time.Now().UnixNano())
 
 	var state *g7.State
 	if !*fresh {
@@ -46,33 +114,59 @@ func main() {
 		state = s
 	}
 	if state == nil {
-		rand.Seed(time.Now().UnixNano())
-		if *serial == 0 {
-			*serial = 3000000000 + uint64(rand.Int63n(999999999))
+		ageMinutes := age.Minutes()
+		c := sensorConfig{Model: *model, Days: *days, Code: *code, Serial: *serial, AgeMinutes: &ageMinutes}
+		flag.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "lifetime":
+				h := lifetime.Hours()
+				c.LifetimeHours = &h
+			case "warmup":
+				m := warmup.Minutes()
+				c.WarmupMinutes = &m
+			}
+		})
+		s, err := newState(c)
+		if err != nil {
+			log.Fatal(err)
 		}
-		if *code == "" {
-			*code = fmt.Sprintf("%04d", rand.Intn(10000))
-		}
-		// Derive the two-letter name suffix from the serial, so a given serial
-		// always presents as the same sensor (name and BLE address) even after
-		// the state file is lost and recreated.
-		suffix := fmt.Sprintf("%c%c", 'a'+byte((*serial/26)%26), 'a'+byte(*serial%26))
-		state = g7.NewState(*serial, *code, *model, suffix, time.Now().Add(-*age), *days)
-		if err := state.Save(*statePath); err != nil {
+		if err := s.Save(*statePath); err != nil {
 			log.Fatalf("saving %s: %v", *statePath, err)
 		}
+		state = s
 		log.Printf("new sensor")
 	}
 
 	log.Printf("g7sim — for development use only, not a Dexcom product; simulated data only")
 
 	sensor := g7.NewSensor(state, *statePath, g7.MeasuredTiming())
-	log.Printf("%s (%s, %d day) serial %d pairing code %s, activated %s", sensor.Name(), sensor.Model(), state.NominalDays(), sensor.Serial(), sensor.PairingCode(), state.Activation.Format(time.RFC3339))
+	log.Printf("%s (%s, %d-day preset, lifetime %v, warmup %v) serial %d pairing code %s, activated %s",
+		sensor.Name(), sensor.Model(), state.Days, state.Lifetime(), state.Warmup,
+		sensor.Serial(), sensor.PairingCode(), state.Activation.Format(time.RFC3339))
 
 	radio, err := NewRadio(sensor, *maxConn)
 	if err != nil {
 		log.Fatalf("starting Bluetooth: %v", err)
 	}
-	go serveAPI(*api, sensor)
+
+	// replace swaps in a new sensor: it is saved over the state file and the
+	// emulator re-executes itself, so the new sensor starts exactly as a
+	// normal launch does, with its own name, address and GATT table.
+	replace := func(next *g7.State) {
+		sensor.Retire()
+		radio.Stop()
+		if err := next.Save(*statePath); err != nil {
+			log.Fatalf("saving %s: %v", *statePath, err)
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			log.Fatalf("restarting: %v", err)
+		}
+		log.Printf("restarting as the new sensor")
+		args := []string{exe, "-state", *statePath, "-api", *api, "-max-connections", strconv.Itoa(*maxConn)}
+		log.Fatalf("restarting: %v", syscall.Exec(exe, args, os.Environ()))
+	}
+
+	go serveAPI(*api, sensor, replace)
 	radio.Run()
 }

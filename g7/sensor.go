@@ -466,8 +466,10 @@ func (s *Sensor) CalibrationBounds() []byte {
 	return CalibrationBoundsMessage(s.state.Calibration, 1)
 }
 
-func (s *Sensor) Versions() (sessionLength uint32, warmup uint16) {
-	return uint32(s.state.SessionLength / time.Second), uint16(s.state.Warmup / time.Second)
+func (s *Sensor) ExtendedVersion() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return ExtendedVersionMessage(s.state)
 }
 
 func (s *Sensor) Model() string {
@@ -490,7 +492,8 @@ func (s *Sensor) Status() map[string]interface{} {
 	}
 	out := map[string]interface{}{
 		"name": s.Name(), "serial": s.state.Serial, "code": s.state.Code,
-		"model": s.Model(), "days": s.state.NominalDays(),
+		"model": s.Model(), "days": s.state.Days,
+		"lifetimeHours": s.state.Lifetime().Hours(), "warmupMinutes": s.state.Warmup.Minutes(),
 		"activation": s.state.Activation, "slots": slots,
 		"glucoseMode": s.glucose.Describe(),
 	}
@@ -526,7 +529,18 @@ func (s *Sensor) ForgetSlots() {
 	s.save()
 }
 
+// Retire stops the sensor writing its state file, so a replacement can be
+// saved there without being overwritten.
+func (s *Sensor) Retire() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.path = ""
+}
+
 func (s *Sensor) save() {
+	if s.path == "" {
+		return
+	}
 	if err := s.state.Save(s.path); err != nil {
 		log.Printf("saving state: %v", err)
 	}

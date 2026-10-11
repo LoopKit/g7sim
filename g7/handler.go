@@ -372,8 +372,7 @@ func (h *handler) handleControl(msg []byte) {
 		h.link.Notify(CharControl, []byte{opBackfill, 0x00})
 
 	case opExtendedVersion:
-		sessionLength, warmup := h.sensor.Versions()
-		h.link.Notify(CharControl, ExtendedVersionMessage(sessionLength, warmup))
+		h.link.Notify(CharControl, h.sensor.ExtendedVersion())
 
 	case opTransmitterVer:
 		h.link.Notify(CharControl, TransmitterVersionMessage(h.sensor.Serial()))
