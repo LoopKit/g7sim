@@ -58,6 +58,17 @@ A tidy way to run it as a dedicated appliance is a unit with `Conflicts=bluetoot
 sure its clock is NTP-synced before running — the emulator timestamps readings at wall-clock
 time, and a phone will reject readings from a sensor whose clock is off.
 
+### No system Bluetooth bond
+
+Unlike a real G7, the emulator does **not** appear under Settings → Bluetooth on the phone,
+and pairing creates no system-level bond. The raw-HCI stack it uses has no Security Manager
+(SMP) layer: it serves ATT only and never answers a pairing request, so iOS connects without
+encrypting the link. This is harmless — the G7 direct connection authenticates entirely at
+the application layer (the 4-digit-code J-PAKE handshake and the AES reconnect challenge), so
+readings flow normally. The one visible difference is that the sensor is absent from the
+phone's Bluetooth list, and the app's "forget the sensor under Settings → Bluetooth" step is
+a no-op for it.
+
 ### Web UI
 
 Open `http://<pi>:8080/` for a control panel: the current reading and state, the
