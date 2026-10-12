@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -106,6 +107,40 @@ func accepted(t *testing.T, ch chan *end) *end {
 	return nil
 }
 
+type fakeSuspender struct {
+	mu       sync.Mutex
+	attached int
+	wakes    int
+}
+
+func (f *fakeSuspender) Attach(pid int, bundle string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.attached = pid
+}
+
+func (f *fakeSuspender) Detach(pid int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.attached == pid {
+		f.attached = 0
+	}
+}
+
+func (f *fakeSuspender) Wake(pid int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.attached == pid {
+		f.wakes++
+	}
+}
+
+func (f *fakeSuspender) state() (int, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.attached, f.wakes
+}
+
 func TestMuxRoutesEachPeripheralToItsProvider(t *testing.T) {
 	// Unix socket paths are short; $TMPDIR on macOS is too long for one.
 	dir, err := ioutil.TempDir("/tmp", "mux")
@@ -121,7 +156,8 @@ func TestMuxRoutesEachPeripheralToItsProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	m := newMux([]string{sensorPath, podPath})
+	suspended := &fakeSuspender{}
+	m := newMux([]string{sensorPath, podPath}, suspended)
 	go func() {
 		c, err := l.Accept()
 		if err == nil {
@@ -151,8 +187,33 @@ func TestMuxRoutesEachPeripheralToItsProvider(t *testing.T) {
 	app.send(map[string]interface{}{"type": "connect", "id": "POD"})
 	pod.expect("connect")
 	sensor.quiet()
+	_, before := suspended.state()
 	pod.send(map[string]interface{}{"type": "didConnect", "id": "POD"})
 	app.expect("didConnect")
+	// Every provider's events wake a suspended app, not only the sensor's.
+	if attached, wakes := suspended.state(); attached != 1 || wakes != before+1 {
+		t.Fatalf("app %d woken %d times for the pod's event, want app 1 woken once", attached, wakes-before)
+	}
+
+	// An advertisement wakes the app only if its scan would find it.
+	app.send(map[string]interface{}{"type": "scan", "services": []string{"C00A"}})
+	sensor.expect("scan")
+	pod.expect("scan")
+	advert := func(services ...string) map[string]interface{} {
+		return map[string]interface{}{"type": "didDiscover", "id": "POD",
+			"adv": map[string]interface{}{"kCBAdvDataServiceUUIDs": services}}
+	}
+	_, before = suspended.state()
+	pod.send(advert("4024", "C001"))
+	app.expect("didDiscover")
+	if _, wakes := suspended.state(); wakes != before {
+		t.Fatal("woken for an advertisement the scan filters out")
+	}
+	pod.send(advert("4024", "0000C00A-0000-1000-8000-00805F9B34FB"))
+	app.expect("didDiscover")
+	if _, wakes := suspended.state(); wakes != before+1 {
+		t.Fatal("not woken for an advertisement the scan finds")
+	}
 
 	// A connect to a peripheral the app knows from before goes to every
 	// provider; the one holding it is its owner, the others' refusals drop.
@@ -179,4 +240,7 @@ func TestMuxRoutesEachPeripheralToItsProvider(t *testing.T) {
 	conn.Close()
 	sensor.closed()
 	pod.closed()
+	if attached, _ := suspended.state(); attached != 0 {
+		t.Fatalf("still following app %d after it left", attached)
+	}
 }

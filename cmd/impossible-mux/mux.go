@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -22,11 +23,6 @@ func (l *line) send(b []byte) {
 	if _, err := l.conn.Write(append(append([]byte(nil), b...), '\n')); err != nil {
 		log.Printf("send to %s: %v", l.conn.RemoteAddr(), err)
 	}
-}
-
-func (l *line) sendMsg(msg map[string]interface{}) {
-	b, _ := json.Marshal(msg)
-	l.send(b)
 }
 
 func readLines(conn net.Conn, each func(raw []byte, msg map[string]interface{})) {
@@ -49,13 +45,21 @@ func str(msg map[string]interface{}, key string) string {
 
 type mux struct {
 	providers []string
+	suspend   suspender // set: the app is stopped while iOS would have it suspended
 
 	mu      sync.Mutex
 	current *session
 }
 
-func newMux(providers []string) *mux {
-	return &mux{providers: providers}
+// suspender is suspend.Suspender's part the mux uses.
+type suspender interface {
+	Attach(pid int, bundle string)
+	Detach(pid int)
+	Wake(pid int)
+}
+
+func newMux(providers []string, s suspender) *mux {
+	return &mux{providers: providers, suspend: s}
 }
 
 // serve connects an app to every provider. A new app takes over from the
@@ -92,7 +96,9 @@ type session struct {
 	mu        sync.Mutex
 	closed    bool
 	hello     []byte
-	scan      []byte // the app's scan, while it scans
+	pid       int             // the app's, from its hello
+	scan      []byte          // the app's scan, while it scans
+	filter    map[string]bool // its service filter, canonical; empty: every advertisement
 	backends  []*line
 	owner     map[string]int          // provider of each peripheral id
 	pending   map[string]map[int]bool // providers asked to connect to a peripheral no one has claimed yet
@@ -106,8 +112,11 @@ func (s *session) close() {
 		return
 	}
 	s.closed = true
-	backends := s.backends
+	backends, pid := s.backends, s.pid
 	s.mu.Unlock()
+	if s.mux.suspend != nil && pid > 0 {
+		s.mux.suspend.Detach(pid)
+	}
 	s.app.conn.Close()
 	// Each provider sees the app end, as it would without the mux.
 	for _, b := range backends {
@@ -196,11 +205,11 @@ func (s *session) providerGone(i int) {
 		return
 	}
 	for _, id := range lost {
-		s.app.sendMsg(map[string]interface{}{"type": "didDisconnect", "id": id, "error": "provider went away",
+		s.toApp(map[string]interface{}{"type": "didDisconnect", "id": id, "error": "provider went away",
 			"timestamp": float64(time.Now().UnixNano())/1e9 - 978307200, "isReconnecting": false})
 	}
 	for _, id := range failed {
-		s.app.sendMsg(map[string]interface{}{"type": "didFailConnect", "id": id, "error": "unknown peripheral"})
+		s.toApp(map[string]interface{}{"type": "didFailConnect", "id": id, "error": "unknown peripheral"})
 	}
 }
 
@@ -237,11 +246,23 @@ func (s *session) fromApp(raw []byte, msg map[string]interface{}) {
 	case t == "hello":
 		s.hello = raw
 		to = all
+		if pid, _ := msg["pid"].(float64); pid > 0 && s.mux.suspend != nil {
+			s.pid = int(pid)
+			s.mux.suspend.Attach(s.pid, str(msg, "bundleId"))
+		}
 	case t == "scan":
 		s.scan = raw
+		s.filter = map[string]bool{}
+		if services, ok := msg["services"].([]interface{}); ok {
+			for _, v := range services {
+				if u, ok := v.(string); ok {
+					s.filter[canonicalUUID(u)] = true
+				}
+			}
+		}
 		to = all
 	case t == "stopScan":
-		s.scan = nil
+		s.scan, s.filter = nil, nil
 		to = all
 	case id == "":
 		to = all
@@ -268,9 +289,9 @@ func (s *session) fromApp(raw []byte, msg map[string]interface{}) {
 	if len(to) == 0 && id != "" {
 		switch t {
 		case "connect":
-			s.app.sendMsg(map[string]interface{}{"type": "didFailConnect", "id": id, "error": "unknown peripheral"})
+			s.toApp(map[string]interface{}{"type": "didFailConnect", "id": id, "error": "unknown peripheral"})
 		case "cancel":
-			s.app.sendMsg(map[string]interface{}{"type": "didDisconnect", "id": id, "error": "",
+			s.toApp(map[string]interface{}{"type": "didDisconnect", "id": id, "error": "",
 				"timestamp": float64(time.Now().UnixNano())/1e9 - 978307200, "isReconnecting": false})
 		default:
 			log.Printf("app: %s for unknown peripheral %s dropped", t, id)
@@ -336,8 +357,58 @@ func (s *session) fromProvider(i int, raw []byte, msg map[string]interface{}) {
 			}
 		}
 	}
+	// iOS wakes an app for an advertisement only if it matches the app's scan.
+	wake := t != "didDiscover" || s.matchesScan(msg)
 	s.mu.Unlock()
 	if forward {
+		if wake {
+			s.wakeApp()
+		}
 		s.app.send(raw)
 	}
+}
+
+// wakeApp gives a suspended app a Bluetooth event's run time, as bluetoothd
+// does.
+func (s *session) wakeApp() {
+	s.mu.Lock()
+	pid := s.pid
+	s.mu.Unlock()
+	if s.mux.suspend != nil && pid > 0 {
+		s.mux.suspend.Wake(pid)
+	}
+}
+
+// toApp sends the app a Bluetooth event the mux makes up for a provider.
+func (s *session) toApp(msg map[string]interface{}) {
+	b, _ := json.Marshal(msg)
+	s.wakeApp()
+	s.app.send(b)
+}
+
+func (s *session) matchesScan(msg map[string]interface{}) bool {
+	if len(s.filter) == 0 {
+		return s.scan != nil
+	}
+	adv, _ := msg["adv"].(map[string]interface{})
+	services, _ := adv["kCBAdvDataServiceUUIDs"].([]interface{})
+	for _, v := range services {
+		if u, ok := v.(string); ok && s.filter[canonicalUUID(u)] {
+			return true
+		}
+	}
+	return false
+}
+
+// canonicalUUID writes a 16- or 32-bit UUID in its 128-bit form, as
+// CoreBluetooth compares them.
+func canonicalUUID(u string) string {
+	u = strings.ToUpper(u)
+	switch len(u) {
+	case 4:
+		return "0000" + u + "-0000-1000-8000-00805F9B34FB"
+	case 8:
+		return u + "-0000-1000-8000-00805F9B34FB"
+	}
+	return u
 }

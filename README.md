@@ -165,8 +165,14 @@ Each provider sees the app as its only client. The mux sends the app's session-w
 (hello, scans) to all of them and each peripheral's requests to the provider that has it; a
 connect to a peripheral it has not seen (one the app retrieved after a relaunch) goes to all,
 and the one that holds it owns it. A provider that restarts rejoins, and its peripherals
-disconnect from the app meanwhile, as a device that powers off does. With `-suspend`, only
-g7sim's messages wake a suspended app so far, not other providers'.
+disconnect from the app meanwhile, as a device that powers off does.
+
+For [suspension](#background-wakes-suspension-and-termination), give `-suspend` to the mux
+rather than to g7sim, so every provider's messages wake the app:
+
+```bash
+./impossible-mux -simulator <simulator> -suspend /tmp/impossible-g7.sock /tmp/impossible-pod.sock
+```
 
 ### Background wakes, suspension and termination
 

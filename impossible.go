@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/loopkit/g7sim/g7"
+	"github.com/loopkit/g7sim/suspend"
 )
 
 // SimRadio serves the sensor to an app in the iOS Simulator through
@@ -51,7 +52,7 @@ type SimRadio struct {
 	Relaunch func(bundleID string) error
 
 	// Suspend, if set, stops the app while iOS would have it suspended.
-	Suspend *suspender
+	Suspend *suspend.Suspender
 }
 
 // heldRequests is what an app that iOS terminated left lodged. bluetoothd
@@ -234,7 +235,7 @@ func (r *SimRadio) dropClient(c *simClient, ended bool) {
 		log.Printf("simulator: %s ended with %s lodged; holding it as iOS would for a terminated app", c.bundle, held)
 	}
 	if r.Suspend != nil && c.pid > 0 {
-		r.Suspend.detach(c.pid)
+		r.Suspend.Detach(c.pid)
 	}
 	if l != nil {
 		l.end(false)
@@ -325,8 +326,8 @@ func (r *SimRadio) handle(c *simClient, msg map[string]interface{}) {
 		log.Printf("simulator: %s (ImpossiBLE %s, pid %v) connected as %s",
 			c.bundle, str(msg, "clientVersion"), msg["pid"], c.addr)
 		if s := r.Suspend; s != nil && c.pid > 0 {
-			s.attach(c.pid, c.bundle)
-			c.wake = func() { s.wake(c.pid) }
+			s.Attach(c.pid, c.bundle)
+			c.wake = func() { s.Wake(c.pid) }
 		}
 		r.takeOver(c)
 		r.mu.Lock()

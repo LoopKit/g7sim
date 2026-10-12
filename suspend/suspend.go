@@ -1,4 +1,4 @@
-package main
+package suspend
 
 import (
 	"bufio"
@@ -18,12 +18,12 @@ import (
 // bluetooth-central background mode run for one Bluetooth event.
 const bluetoothWake = 10 * time.Second
 
-// suspender makes a backgrounded app in the Simulator actually stop.
+// Suspender makes a backgrounded app in the Simulator actually stop.
 // runningboard decides when an app should be suspended, as on a phone, but
 // cannot stop a Mac process; the suspender follows its verdicts with
 // SIGSTOP and SIGCONT, and resumes the app for each Bluetooth event, as
 // bluetoothd wakes it.
-type suspender struct {
+type Suspender struct {
 	simulator string
 
 	mu        sync.Mutex
@@ -34,8 +34,8 @@ type suspender struct {
 	stopped   bool
 }
 
-func newSuspender(simulator string) *suspender {
-	s := &suspender{simulator: simulator}
+func New(simulator string) *Suspender {
+	s := &Suspender{simulator: simulator}
 	go s.watch()
 	go func() {
 		for range time.Tick(250 * time.Millisecond) {
@@ -45,18 +45,18 @@ func newSuspender(simulator string) *suspender {
 		}
 	}()
 	go func() {
-		// Leave the app running when g7sim exits.
+		// Leave the app running on exit.
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 		<-ch
-		s.release()
+		s.Release()
 		os.Exit(1)
 	}()
 	return s
 }
 
 // attach follows a newly connected app.
-func (s *suspender) attach(pid int, bundle string) {
+func (s *Suspender) Attach(pid int, bundle string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.resume()
@@ -64,7 +64,7 @@ func (s *suspender) attach(pid int, bundle string) {
 }
 
 // detach stops following an app that ended or lost the socket.
-func (s *suspender) detach(pid int) {
+func (s *Suspender) Detach(pid int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.pid == pid {
@@ -75,7 +75,7 @@ func (s *suspender) detach(pid int) {
 
 // wake gives the app a Bluetooth event's run time, whether or not it is
 // suspended yet: bluetoothd's assertion keeps it running that long.
-func (s *suspender) wake(pid int) {
+func (s *Suspender) Wake(pid int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.pid != pid {
@@ -89,13 +89,13 @@ func (s *suspender) wake(pid int) {
 	s.apply(now)
 }
 
-func (s *suspender) release() {
+func (s *Suspender) Release() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.resume()
 }
 
-func (s *suspender) apply(now time.Time) {
+func (s *Suspender) apply(now time.Time) {
 	if s.pid == 0 {
 		return
 	}
@@ -113,7 +113,7 @@ func (s *suspender) apply(now time.Time) {
 	}
 }
 
-func (s *suspender) resume() {
+func (s *Suspender) resume() {
 	if s.stopped && s.pid != 0 {
 		syscall.Kill(s.pid, syscall.SIGCONT)
 		s.stopped = false
@@ -124,7 +124,7 @@ func (s *suspender) resume() {
 // "Received state update for 48134 (app<…>, running-suspended-NotVisible".
 var stateUpdate = regexp.MustCompile(`Received state update for (\d+) \(.*?, (running-[a-z]+)`)
 
-func (s *suspender) watch() {
+func (s *Suspender) watch() {
 	for {
 		cmd := exec.Command("xcrun", "simctl", "spawn", s.simulator, "log", "stream", "--style", "ndjson",
 			"--predicate", `process == "SpringBoard" AND eventMessage CONTAINS "Received state update for"`)
@@ -157,7 +157,7 @@ func (s *suspender) watch() {
 	}
 }
 
-func (s *suspender) update(pid string, suspended bool) {
+func (s *Suspender) update(pid string, suspended bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.pid == 0 || pid != strconv.Itoa(s.pid) || s.suspended == suspended {

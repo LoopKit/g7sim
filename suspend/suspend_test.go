@@ -1,4 +1,4 @@
-package main
+package suspend
 
 import (
 	"os/exec"
@@ -19,8 +19,8 @@ func TestSuspenderFollowsRunningboardAndWakesForBluetooth(t *testing.T) {
 		cmd.Wait()
 	}()
 	pid := cmd.Process.Pid
-	s := &suspender{}
-	s.attach(pid, "com.example.loop")
+	s := &Suspender{}
+	s.Attach(pid, "com.example.loop")
 	stopped := func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -31,7 +31,7 @@ func TestSuspenderFollowsRunningboardAndWakesForBluetooth(t *testing.T) {
 	if !stopped() {
 		t.Fatal("not stopped once runningboard suspended it")
 	}
-	s.wake(pid)
+	s.Wake(pid)
 	if stopped() {
 		t.Fatal("still stopped after a Bluetooth event")
 	}
@@ -47,14 +47,14 @@ func TestSuspenderFollowsRunningboardAndWakesForBluetooth(t *testing.T) {
 	}
 
 	// An event's run time outlasts runningboard's verdicts in the meantime.
-	s.wake(pid)
+	s.Wake(pid)
 	s.update(strconv.Itoa(pid), true)
 	s.update(strconv.Itoa(pid), false)
 	s.update(strconv.Itoa(pid), true)
 	if stopped() {
 		t.Fatal("stopped within a Bluetooth event's run time")
 	}
-	s.detach(pid)
+	s.Detach(pid)
 	if stopped() {
 		t.Fatal("left stopped after detaching")
 	}
