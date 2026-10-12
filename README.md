@@ -1,8 +1,14 @@
 # g7sim
 
-A Dexcom G7 sensor emulator for a Raspberry Pi, for exercising G7SensorKit's direct
-connection without a real sensor. Built on the same `paypal/gatt` HCI stack as
-[LoopKit/pod](https://github.com/LoopKit/pod).
+A Dexcom G7 sensor emulator, for exercising G7SensorKit's direct connection without a
+real sensor. It has two transports:
+
+- **Bluetooth** (`-transport ble`, the default): a real radio on Linux, such as a
+  Raspberry Pi, for an app on a phone. Built on the same `paypal/gatt` HCI stack as
+  [LoopKit/pod](https://github.com/LoopKit/pod).
+- **iOS Simulator** (`-transport impossible`): on a Mac, g7sim stands in for Bluetooth
+  for an app in the Simulator, through [ImpossiBLE](https://github.com/mickeyl/ImpossiBLE).
+  No radio needed.
 
 > **For development use only — not a Dexcom product.** g7sim is an independent,
 > unofficial tool for testing CGM software. It is not made, endorsed, or supported by
@@ -24,7 +30,7 @@ connection without a real sensor. Built on the same `paypal/gatt` HCI stack as
 | iOS Simulator transport (`impossible.go`, via ImpossiBLE) | done; Loop pairs, reads and reconnects in the Simulator |
 | Wake-path check, suspension, termination relaunch + state restoration | done, unit tested; run against Loop |
 
-## Build and run on the Pi
+## Build and run on a Raspberry Pi
 
 Go 1.15 (what the Pi has) is enough. From a checkout on the Pi:
 
