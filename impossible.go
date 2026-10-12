@@ -42,6 +42,7 @@ type SimRadio struct {
 	link     *simLink
 	mode     g7.AdvertMode
 	tried    time.Time // last attempt to bring up a pending connection
+	startAt  time.Time // a pending connect's start delay ends
 
 	missedWakes int // readings advertised with nothing lodged to wake the app
 	held        *heldRequests
@@ -259,6 +260,12 @@ func str(msg map[string]interface{}, key string) string {
 	return s
 }
 
+func startDelay(msg map[string]interface{}) time.Duration {
+	options, _ := msg["options"].(map[string]interface{})
+	seconds, _ := options["kCBConnectOptionStartDelay"].(float64)
+	return time.Duration(seconds * float64(time.Second))
+}
+
 func (r *SimRadio) current(c *simClient) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -367,6 +374,7 @@ func (r *SimRadio) handle(c *simClient, msg map[string]interface{}) {
 		if r.link == nil {
 			r.pending = true
 			r.tried = time.Time{}
+			r.startAt = time.Now().Add(startDelay(msg))
 		}
 		r.mu.Unlock()
 		r.tryConnect(time.Now())
@@ -536,12 +544,13 @@ func (r *SimRadio) setNotify(c *simClient, msg map[string]interface{}) {
 }
 
 // tryConnect brings up a pending connection once the sensor advertises, as
-// iOS completes a pending connect on the next advert it hears. A link the
-// sensor refuses stays pending, as a refusal at the link layer does.
+// iOS completes a pending connect on the next advert it hears after the
+// connect's start delay. A link the sensor refuses stays pending, as a
+// refusal at the link layer does.
 func (r *SimRadio) tryConnect(now time.Time) {
 	r.mu.Lock()
 	c, mode := r.client, r.mode
-	if !r.pending || c == nil || r.link != nil || mode == g7.AdvertOff || now.Sub(r.tried) < time.Second {
+	if !r.pending || c == nil || r.link != nil || mode == g7.AdvertOff || now.Sub(r.tried) < time.Second || now.Before(r.startAt) {
 		r.mu.Unlock()
 		return
 	}

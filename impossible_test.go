@@ -132,6 +132,44 @@ func TestSimRadioServesTheSensor(t *testing.T) {
 	c.expect("didDisconnect")
 }
 
+func TestSimRadioHoldsAConnectForItsStartDelay(t *testing.T) {
+	dir, err := ioutil.TempDir("/tmp", "g7sim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	age := 120 + 3.0/60
+	state, err := newState(sensorConfig{Code: "1234", Serial: 3123456789, AgeMinutes: &age})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sensor := g7.NewSensor(state, filepath.Join(dir, "state.json"), g7.MeasuredTiming())
+	socket := filepath.Join(dir, "sock")
+	r, err := NewSimRadio(sensor, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	go r.Run()
+
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	c := &simTestClient{t: t, conn: conn, in: bufio.NewScanner(conn)}
+	c.send(map[string]interface{}{"type": "hello", "bundleId": "com.example.loop", "clientVersion": "3.1.0"})
+
+	start := time.Now()
+	c.send(map[string]interface{}{"type": "connect", "id": peripheralID(3123456789),
+		"options": map[string]interface{}{"kCBConnectOptionStartDelay": 1.5}})
+	c.expect("didConnect")
+	if waited := time.Since(start); waited < 1500*time.Millisecond {
+		t.Fatalf("connected after %v, inside the 1.5 s start delay", waited)
+	}
+}
+
 func TestSimRadioCountsReadingsNothingWouldWake(t *testing.T) {
 	dir, err := ioutil.TempDir("/tmp", "g7sim")
 	if err != nil {
