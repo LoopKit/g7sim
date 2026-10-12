@@ -21,8 +21,9 @@ git -C "$src" checkout --quiet --force "$commit"
 # Fixes proposed upstream, where ImpossiBLE behaves unlike CoreBluetooth in
 # ways Loop's device drivers trip on: state callbacks off the central's
 # queue (mickeyl/ImpossiBLE#2, #3), a scan filter written as a 128-bit UUID
-# missing a 16-bit advert, subscriptions surviving a disconnect, and
-# retrievePeripheralsWithIdentifiers: forgetting peripherals on relaunch.
+# missing a 16-bit advert (#4), subscriptions and services surviving a
+# disconnect (#5), and retrievePeripheralsWithIdentifiers: forgetting
+# peripherals on relaunch (#6).
 for patch in "$here"/impossible-patches/*.patch; do
 	git -C "$src" apply "$patch"
 done
