@@ -104,7 +104,16 @@ func TestReconnectHandshakeAndSession(t *testing.T) {
 	if got.char != CharControl || len(got.data) != 19 || got.data[0] != opGlucose {
 		t.Fatalf("glucose reply: %x on %s", got.data, got.char)
 	}
-	if !s.win.servedTypes[DisplayPhone] {
+	// The handler records it after sending the reply.
+	served := func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.win.servedTypes[DisplayPhone]
+	}
+	for deadline := time.Now().Add(time.Second); !served() && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	if !served() {
 		t.Error("the phone was not recorded as having collected the reading")
 	}
 
