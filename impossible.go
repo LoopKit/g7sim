@@ -10,7 +10,10 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -38,13 +41,38 @@ type SimRadio struct {
 	link     *simLink
 	mode     g7.AdvertMode
 	tried    time.Time // last attempt to bring up a pending connection
+
+	missedWakes int // readings advertised with nothing lodged to wake the app
+	held        *heldRequests
+	forceQuit   bool // the running app's end is a force-quit, not a termination
+
+	// Relaunch starts a terminated app again, as iOS does when a request it
+	// is holding for the app completes. Nil only logs that it would.
+	Relaunch func(bundleID string) error
+
+	// Suspend, if set, stops the app while iOS would have it suspended.
+	Suspend *suspender
+}
+
+// heldRequests is what an app that iOS terminated left lodged. bluetoothd
+// keeps them, relaunches the app when one completes and hands them back
+// through state restoration. A force-quit drops them.
+type heldRequests struct {
+	bundleID string
+	connect  bool
+	scan     bool
+	launched time.Time
 }
 
 type simClient struct {
-	conn   net.Conn
-	addr   string // what the sensor sees as the central's address
-	mu     sync.Mutex
-	closed bool
+	conn    net.Conn
+	addr    string // what the sensor sees as the central's address
+	bundle  string
+	pid     int
+	restore *heldRequests // handed back at the app's first request
+	wake    func()        // runs before each send: a suspended app wakes for it
+	mu      sync.Mutex
+	closed  bool
 }
 
 func (c *simClient) send(msg map[string]interface{}) {
@@ -52,6 +80,9 @@ func (c *simClient) send(msg map[string]interface{}) {
 	if err != nil {
 		log.Printf("simulator: encoding %v: %v", msg["type"], err)
 		return
+	}
+	if c.wake != nil {
+		c.wake()
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -173,14 +204,21 @@ func (r *SimRadio) serve(c *simClient) {
 		}
 		r.handle(c, msg)
 	}
-	r.dropClient(c)
+	r.dropClient(c, true)
 }
 
-// dropClient forgets everything about an app that went away, as a phone
-// that turns Bluetooth off does: its link closes and its scan stops.
-func (r *SimRadio) dropClient(c *simClient) {
+// dropClient forgets an app that went away: its link closes and its scan
+// stops. An app that ended, rather than lost the socket to another app, is
+// one iOS terminated, and what it had lodged is held for it.
+func (r *SimRadio) dropClient(c *simClient, ended bool) {
 	r.mu.Lock()
+	var held *heldRequests
 	if r.client == c {
+		if ended && !r.forceQuit && c.bundle != "" && (r.pending || r.scanning) {
+			held = &heldRequests{bundleID: c.bundle, connect: r.pending, scan: r.scanning}
+			r.held = held
+		}
+		r.forceQuit = false
 		r.client = nil
 		r.scanning = false
 		r.pending = false
@@ -192,10 +230,27 @@ func (r *SimRadio) dropClient(c *simClient) {
 		l = nil
 	}
 	r.mu.Unlock()
+	if held != nil {
+		log.Printf("simulator: %s ended with %s lodged; holding it as iOS would for a terminated app", c.bundle, held)
+	}
+	if r.Suspend != nil && c.pid > 0 {
+		r.Suspend.detach(c.pid)
+	}
 	if l != nil {
 		l.end(false)
 	}
 	c.close()
+}
+
+func (h *heldRequests) String() string {
+	switch {
+	case h.connect && h.scan:
+		return "a connect and a scan"
+	case h.connect:
+		return "a connect"
+	default:
+		return "a scan"
+	}
 }
 
 func str(msg map[string]interface{}, key string) string {
@@ -220,21 +275,73 @@ func (r *SimRadio) takeOver(c *simClient) {
 		log.Printf("simulator: a new app connected; dropping the previous one")
 		old.send(map[string]interface{}{"type": "connectionRejected", "code": "clientBusy",
 			"message": "another app connected to g7sim"})
-		r.dropClient(old)
+		r.dropClient(old, false)
+	}
+}
+
+// restoreState hands a relaunched app the requests held for it, as iOS does
+// through centralManager(_:willRestoreState:). It waits for the app's first
+// request: ImpossiBLE says hello before it has recorded the central's queue.
+func (r *SimRadio) restoreState(c *simClient) {
+	h := c.restore
+	c.restore = nil
+	ids, services := []string{}, []string{}
+	if h.connect {
+		ids = append(ids, r.id)
+	}
+	if h.scan {
+		services = append(services, advertisedServiceUUID)
+	}
+	c.send(map[string]interface{}{"type": "didRestoreState", "peripheralIds": ids,
+		"scanServices": services, "scanOptions": map[string]interface{}{}})
+	r.mu.Lock()
+	r.pending = r.pending || h.connect
+	r.scanning = r.scanning || h.scan
+	r.mu.Unlock()
+	log.Printf("simulator: restored %s for %s", h, c.bundle)
+}
+
+// ForceQuit drops what a terminated app left lodged, as iOS does when the
+// user swipes the app away: nothing will relaunch it.
+// Called while the app runs, it applies to the app's end.
+func (r *SimRadio) ForceQuit() {
+	r.mu.Lock()
+	h := r.held
+	r.held = nil
+	r.forceQuit = r.client != nil
+	r.mu.Unlock()
+	if h != nil {
+		log.Printf("simulator: %s force-quit; dropped its held %s", h.bundleID, h)
 	}
 }
 
 func (r *SimRadio) handle(c *simClient, msg map[string]interface{}) {
 	t := str(msg, "type")
 	if t == "hello" {
-		c.addr = centralAddr(str(msg, "bundleId"))
+		c.bundle = str(msg, "bundleId")
+		c.addr = centralAddr(c.bundle)
+		pid, _ := msg["pid"].(float64)
+		c.pid = int(pid)
 		log.Printf("simulator: %s (ImpossiBLE %s, pid %v) connected as %s",
-			str(msg, "bundleId"), str(msg, "clientVersion"), msg["pid"], c.addr)
+			c.bundle, str(msg, "clientVersion"), msg["pid"], c.addr)
+		if s := r.Suspend; s != nil && c.pid > 0 {
+			s.attach(c.pid, c.bundle)
+			c.wake = func() { s.wake(c.pid) }
+		}
 		r.takeOver(c)
+		r.mu.Lock()
+		if r.held != nil && r.held.bundleID == c.bundle {
+			c.restore = r.held
+			r.held = nil
+		}
+		r.mu.Unlock()
 		return
 	}
 	if !r.current(c) {
 		return
+	}
+	if c.restore != nil {
+		r.restoreState(c)
 	}
 	id := str(msg, "id")
 	switch t {
@@ -468,18 +575,47 @@ func (r *SimRadio) Run() {
 		changed := mode != r.mode
 		r.mode = mode
 		c, scanning := r.client, r.scanning
+		missed := 0
+		var relaunch *heldRequests
 		if changed {
 			r.tried = time.Time{}
+			if mode == g7.AdvertFull && !r.pending && !scanning && r.link == nil && r.held == nil {
+				r.missedWakes++
+				missed = r.missedWakes
+			}
+			if mode != g7.AdvertOff && c == nil && r.held != nil && now.Sub(r.held.launched) > 20*time.Second {
+				r.held.launched = now
+				relaunch = r.held
+			}
 		}
 		r.mu.Unlock()
 		if changed {
 			log.Printf("advertising %s (types in use %02x)", mode, r.sensor.TypesInUse())
+			if missed > 0 {
+				log.Printf("NO WAKE PATH: the sensor is advertising a reading and the app has no pending connect or scan; a backgrounded Loop would sleep through it (%d so far)", missed)
+			}
+			if relaunch != nil {
+				r.relaunch(relaunch)
+			}
 			if mode == g7.AdvertFull && scanning && c != nil {
 				r.discovered(c)
 			}
 		}
 		r.tryConnect(now)
 	}
+}
+
+func (r *SimRadio) relaunch(h *heldRequests) {
+	if r.Relaunch == nil {
+		log.Printf("simulator: iOS would relaunch %s now for its held %s (start g7sim with -simulator and -relaunch to do it)", h.bundleID, h)
+		return
+	}
+	log.Printf("simulator: relaunching %s for its held %s", h.bundleID, h)
+	go func() {
+		if err := r.Relaunch(h.bundleID); err != nil {
+			log.Printf("simulator: relaunching %s: %v", h.bundleID, err)
+		}
+	}()
 }
 
 // Stop closes the socket, ending any link; the app sees Bluetooth power off
@@ -493,7 +629,7 @@ func (r *SimRadio) Stop() {
 	c := r.client
 	r.mu.Unlock()
 	if c != nil {
-		r.dropClient(c)
+		r.dropClient(c, false)
 	}
 	os.Remove(r.path)
 }
@@ -588,4 +724,35 @@ func (l *simLink) run() {
 		}
 	}
 	l.handler.Closed()
+}
+
+// simctlRelauncher launches the app on a simulator with ImpossiBLE injected.
+// simctl brings it to the foreground; iOS would relaunch it in the background.
+func simctlRelauncher(simulator, dylib string) func(string) error {
+	if dylib == "" {
+		exe, err := os.Executable()
+		if err == nil {
+			dylib = filepath.Join(filepath.Dir(exe), "simulator", "build", "libImpossiBLE.dylib")
+		}
+	}
+	return func(bundleID string) error {
+		cmd := exec.Command("xcrun", "simctl", "launch", simulator, bundleID)
+		cmd.Env = append(os.Environ(), "SIMCTL_CHILD_DYLD_INSERT_LIBRARIES="+dylib)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+}
+
+func serveForceQuit(r *SimRadio) {
+	http.HandleFunc("/force-quit", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			http.Error(w, "POST to force-quit", http.StatusMethodNotAllowed)
+			return
+		}
+		r.ForceQuit()
+		w.WriteHeader(http.StatusNoContent)
+	})
 }

@@ -131,3 +131,97 @@ func TestSimRadioServesTheSensor(t *testing.T) {
 	c.send(map[string]interface{}{"type": "cancel", "id": id})
 	c.expect("didDisconnect")
 }
+
+func TestSimRadioCountsReadingsNothingWouldWake(t *testing.T) {
+	dir, err := ioutil.TempDir("/tmp", "g7sim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	age := 120 + 3.0/60
+	state, err := newState(sensorConfig{Code: "1234", Serial: 3123456789, AgeMinutes: &age})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sensor := g7.NewSensor(state, filepath.Join(dir, "state.json"), g7.MeasuredTiming())
+	r, err := NewSimRadio(sensor, filepath.Join(dir, "sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	go r.Run()
+
+	time.Sleep(200 * time.Millisecond)
+	r.mu.Lock()
+	missed := r.missedWakes
+	r.mu.Unlock()
+	if missed != 1 {
+		t.Errorf("missed wakes %d, want 1", missed)
+	}
+}
+
+// An app that ends with a scan lodged gets it back through state restoration
+// when it returns; one that was force-quit does not.
+func TestSimRadioHoldsATerminatedAppsRequests(t *testing.T) {
+	dir, err := ioutil.TempDir("/tmp", "g7sim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	state, err := newState(sensorConfig{Code: "1234", Serial: 3123456789})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sensor := g7.NewSensor(state, filepath.Join(dir, "state.json"), g7.MeasuredTiming())
+	socket := filepath.Join(dir, "sock")
+	r, err := NewSimRadio(sensor, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	go r.Run()
+
+	launch := func() *simTestClient {
+		conn, err := net.Dial("unix", socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := &simTestClient{t: t, conn: conn, in: bufio.NewScanner(conn)}
+		c.send(map[string]interface{}{"type": "hello", "bundleId": "com.example.loop"})
+		return c
+	}
+	held := func() *heldRequests {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.held
+	}
+	waitHeld := func(want bool) {
+		for i := 0; i < 100 && (held() != nil) != want; i++ {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if (held() != nil) != want {
+			t.Fatalf("held %v, want held %v", held(), want)
+		}
+	}
+
+	c := launch()
+	c.send(map[string]interface{}{"type": "scan", "services": []string{"FEBC"}})
+	c.expect("didDiscover")
+	c.conn.Close()
+	waitHeld(true)
+
+	c = launch()
+	c.send(map[string]interface{}{"type": "registerForConnectionEvents"})
+	restored := c.expect("didRestoreState")
+	if s := restored["scanServices"].([]interface{}); len(s) != 1 || s[0] != "FEBC" {
+		t.Errorf("restored %v", restored)
+	}
+	waitHeld(false)
+
+	r.ForceQuit()
+	c.conn.Close()
+	time.Sleep(100 * time.Millisecond)
+	waitHeld(false)
+}

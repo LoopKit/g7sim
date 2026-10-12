@@ -17,6 +17,8 @@ import (
 //	               {"kind":"walk","value":140}
 //	               add "algorithmState":18 to simulate a sensor issue
 //	POST /forget                 drop every display's key
+//	POST /force-quit             (-transport impossible) the app's end is a force-quit:
+//	                             drop what it left lodged instead of relaunching it
 //	POST /new      {"model":"stelo","days":15,"code":"1234","serial":0,
 //	                "ageMinutes":120,"lifetimeHours":360,"warmupMinutes":62}
 //	               replace this sensor with a new one and restart; omitted

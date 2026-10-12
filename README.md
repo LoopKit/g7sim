@@ -22,6 +22,7 @@ connection without a real sensor. Built on the same `paypal/gatt` HCI stack as
 | GATT layout, random static address, HTTP API | done, runs on the Pi |
 | Per-connection protocol handler (`g7/handler.go`) | done, reconnect + session integration-tested; fresh pairing untested against real hardware |
 | iOS Simulator transport (`impossible.go`, via ImpossiBLE) | done; Loop pairs, reads and reconnects in the Simulator |
+| Wake-path check, suspension, termination relaunch + state restoration | done, unit tested; run against Loop |
 
 ## Build and run on the Pi
 
@@ -139,6 +140,48 @@ live. A provider serves one app at a time, and a newly launched app takes over.
 The app sees the sensor's advertising schedule, not a sensor that is always there: it is
 discovered only while it advertises, and a connect waits for the next advert, as iOS's does.
 The protocol, the web UI and the API are the same as on the Pi.
+
+### Background wakes, suspension and termination
+
+On a phone a backgrounded Loop runs only when iOS wakes it for a Bluetooth request it is
+holding: a pending connect, a scan, or a notification on a live link. g7sim checks this at
+every reading. If the app has no pending connect, no scan and no link when the sensor starts
+advertising, it logs `NO WAKE PATH` with a running count: on a phone, Loop would sleep through
+that reading.
+
+The Simulator does not enforce this by itself. runningboard decides when to suspend a
+backgrounded app, as on a phone, but cannot stop a Mac process, so the app keeps running. With
+`-suspend`, g7sim follows runningboard's verdicts from the simulator's log and stops the app
+(`SIGSTOP`) while it is suspended. Everything g7sim sends a suspended app is a Bluetooth event
+that iOS would wake it for, so each one gives the app 10 s of run time (`SIGCONT`), as
+bluetoothd's assertion does. A reading the app had nothing lodged for is then really missed.
+
+```bash
+./g7sim -transport impossible -simulator <simulator> -suspend
+```
+
+g7sim learns runningboard's verdicts from changes, so it treats an app it has just met as
+running until the next one. When g7sim exits on a signal it resumes the app; a `kill -9` of
+g7sim leaves it stopped (`kill -CONT <pid>`).
+
+When the app ends with a connect or scan lodged (`kill -9`, as iOS's memory pressure does),
+g7sim holds the requests, as bluetoothd does. At the next reading it relaunches the app with
+ImpossiBLE injected, and hands the requests back at the app's first call: the app gets
+`centralManager(_:willRestoreState:)` and the held connect completes.
+
+```bash
+./g7sim -transport impossible -simulator <simulator> -relaunch   # injects simulator/build/libImpossiBLE.dylib
+kill -9 <Loop's pid>                                      # iOS terminates Loop
+curl -X POST localhost:8080/force-quit                   # or: the user swiped it away; nothing relaunches it
+```
+
+Without `-relaunch`, g7sim only logs when iOS would relaunch the app. Where it differs from iOS:
+- simctl launches the app in the foreground; iOS relaunches it in the background.
+- The restore arrives after the app's first call, so after `centralManagerDidUpdateState`; on
+  iOS it comes first.
+- The restored peripheral is still connecting, and the connect completes once the app is
+  back. On iOS, bluetoothd has already connected when the app relaunches.
+- A link that is up when the app ends is closed, not kept.
 
 `build-impossible.sh` builds a pinned ImpossiBLE release with
 `simulator/impossible-delegate-queue.patch`, which fixes a state callback delivered on the main

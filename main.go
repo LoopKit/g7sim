@@ -103,6 +103,10 @@ func main() {
 	api := flag.String("api", ":8080", "HTTP control API address")
 	transport := flag.String("transport", "ble", "ble (a Linux Bluetooth adapter) or impossible (ImpossiBLE's socket, for an app in the iOS Simulator)")
 	socket := flag.String("socket", "/tmp/impossible.sock", "ImpossiBLE socket for -transport impossible")
+	simulator := flag.String("simulator", "", "the app's simulator (name or UDID), for -relaunch and -suspend")
+	relaunch := flag.Bool("relaunch", false, "relaunch a terminated app for its lodged connect, as iOS does")
+	suspend := flag.Bool("suspend", false, "stop the app while iOS would have it suspended, waking it for Bluetooth events")
+	dylib := flag.String("dylib", "", "ImpossiBLE library injected into a relaunched app (default: simulator/build/libImpossiBLE.dylib beside g7sim)")
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	rand.Seed(time.Now().UnixNano())
@@ -159,6 +163,16 @@ func main() {
 		if err != nil {
 			log.Fatalf("serving %s: %v", *socket, err)
 		}
+		if (*relaunch || *suspend) && *simulator == "" {
+			log.Fatalf("-relaunch and -suspend need -simulator")
+		}
+		if *relaunch {
+			r.Relaunch = simctlRelauncher(*simulator, *dylib)
+		}
+		if *suspend {
+			r.Suspend = newSuspender(*simulator)
+		}
+		serveForceQuit(r)
 		radio = r
 	default:
 		log.Fatalf("transport %q: want ble or impossible", *transport)
@@ -179,7 +193,8 @@ func main() {
 		}
 		log.Printf("restarting as the new sensor")
 		args := []string{exe, "-state", *statePath, "-api", *api, "-max-connections", strconv.Itoa(*maxConn),
-			"-transport", *transport, "-socket", *socket}
+			"-transport", *transport, "-socket", *socket, "-simulator", *simulator,
+			"-relaunch=" + strconv.FormatBool(*relaunch), "-suspend=" + strconv.FormatBool(*suspend), "-dylib", *dylib}
 		log.Fatalf("restarting: %v", syscall.Exec(exe, args, os.Environ()))
 	}
 
