@@ -147,6 +147,27 @@ The app sees the sensor's advertising schedule, not a sensor that is always ther
 discovered only while it advertises, and a connect waits for the next advert, as iOS's does.
 The protocol, the web UI and the API are the same as on the Pi.
 
+### With other simulated devices
+
+ImpossiBLE connects the app to one socket, so one provider. `impossible-mux` holds that
+socket and connects the app to several providers on their own, such as g7sim and the
+[LoopKit/pod](https://github.com/LoopKit/pod) simulator, so Loop runs with both a simulated
+sensor and a simulated pod:
+
+```bash
+go build -o impossible-mux ./cmd/impossible-mux
+./g7sim -transport impossible -socket /tmp/impossible-g7.sock
+pod -transport impossible -socket /tmp/impossible-pod.sock
+./impossible-mux /tmp/impossible-g7.sock /tmp/impossible-pod.sock
+```
+
+Each provider sees the app as its only client. The mux sends the app's session-wide messages
+(hello, scans) to all of them and each peripheral's requests to the provider that has it; a
+connect to a peripheral it has not seen (one the app retrieved after a relaunch) goes to all,
+and the one that holds it owns it. A provider that restarts rejoins, and its peripherals
+disconnect from the app meanwhile, as a device that powers off does. With `-suspend`, only
+g7sim's messages wake a suspended app so far, not other providers'.
+
 ### Background wakes, suspension and termination
 
 On a phone a backgrounded Loop runs only when iOS wakes it for a Bluetooth request it is

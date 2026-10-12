@@ -2,3 +2,4 @@ g7sim
 *.json
 *.json.tmp
 simulator/build/
+/impossible-mux
