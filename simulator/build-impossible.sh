@@ -18,9 +18,14 @@ if [ ! -d "$src/.git" ]; then
 fi
 git -C "$src" fetch --quiet origin
 git -C "$src" checkout --quiet --force "$commit"
-# Fixes a state callback delivered on the main queue instead of the
-# central's own, which apps that assert their queue (G7SensorKit) trap on.
-git -C "$src" apply "$here/impossible-delegate-queue.patch"
+# Fixes proposed upstream, where ImpossiBLE behaves unlike CoreBluetooth in
+# ways Loop's device drivers trip on: state callbacks off the central's
+# queue (mickeyl/ImpossiBLE#2, #3), a scan filter written as a 128-bit UUID
+# missing a 16-bit advert, subscriptions surviving a disconnect, and
+# retrievePeripheralsWithIdentifiers: forgetting peripherals on relaunch.
+for patch in "$here"/impossible-patches/*.patch; do
+	git -C "$src" apply "$patch"
+done
 
 xcrun -sdk iphonesimulator clang -dynamiclib -fobjc-arc -fmodules \
 	-target arm64-apple-ios15.0-simulator \
