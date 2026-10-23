@@ -205,7 +205,10 @@ func (r *Radio) connected(c gatt.Central) {
 	mode := r.mode
 	r.mu.Unlock()
 
-	if !r.sensor.LinkOpened(addr, time.Now(), mode) {
+	if answer := r.sensor.LinkOpened(addr, time.Now(), mode); answer != g7.LinkAccepted {
+		// BlueZ has already answered the connect request; the closest it can
+		// come is to end the link at once.
+		log.Printf("%s: a real G7's link would be %s; closing it", addr, answer)
 		c.Close()
 		return
 	}

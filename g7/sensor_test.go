@@ -46,11 +46,14 @@ func TestEmptyBurst(t *testing.T) {
 	s, act := newTestSensor(t)
 	reading := act.Add(2 * time.Hour)
 	// A paired sensor whose phone has been gone long enough for its slot to
-	// lapse: a 25 s burst, then silent (no minute calls, nothing holds a slot).
+	// lapse: a 25 s burst, then the minute calls, which go on for the phone.
 	s.state.Slots[DisplayPhone] = &Slot{Key: make([]byte, 16), LastSeen: reading.Add(-20 * time.Minute)}
 	expectModes(t, s, reading, map[float64]AdvertMode{
-		1: AdvertOff, 2.6: AdvertFull, 27: AdvertFull, 28: AdvertOff, 61: AdvertOff,
+		1: AdvertOff, 2.6: AdvertFull, 27: AdvertFull, 28: AdvertOff, 62.6: AdvertBare, 66: AdvertOff,
 	})
+	if s.TypesInUse() != 0 {
+		t.Errorf("types in use %02x with the phone's slot lapsed", s.TypesInUse())
+	}
 }
 
 func TestUnpairedSensorStaysDiscoverable(t *testing.T) {
@@ -68,7 +71,7 @@ func TestPhoneCollectsShortBurst(t *testing.T) {
 	s.state.Slots[DisplayPhone] = &Slot{Key: make([]byte, 16), LastSeen: reading.Add(-5 * time.Minute)}
 
 	s.Tick(at(reading, 3))
-	if !s.LinkOpened("AA", at(reading, 3), AdvertFull) {
+	if s.LinkOpened("AA", at(reading, 3), AdvertFull) != LinkAccepted {
 		t.Fatal("phone refused")
 	}
 	s.Served("AA", DisplayPhone, at(reading, 4))
@@ -83,14 +86,14 @@ func TestServedClientIsDroppedForTheRestOfTheWindow(t *testing.T) {
 	s.LinkOpened("AA", at(reading, 3), AdvertFull)
 	s.Served("AA", DisplayPhone, at(reading, 4))
 	s.LinkClosed(at(reading, 5))
-	if s.LinkOpened("AA", at(reading, 8), AdvertFull) {
-		t.Fatal("a served client got back in during the same window")
+	if got := s.LinkOpened("AA", at(reading, 8), AdvertFull); got != LinkFailedToEstablish {
+		t.Fatalf("a served client reconnecting in the same window: %s", got)
 	}
 	if s.AdmitDisplay("BB", DisplayPhone, at(reading, 8), AdvertFull) {
 		t.Fatal("a second phone got in after the phone collected")
 	}
 	s.Tick(at(reading, 301))
-	if !s.LinkOpened("AA", at(reading, 303), AdvertFull) {
+	if s.LinkOpened("AA", at(reading, 303), AdvertFull) != LinkAccepted {
 		t.Fatal("served client refused in the next window")
 	}
 }
@@ -104,18 +107,47 @@ func TestMissingPhoneExtendsThenMinuteCalls(t *testing.T) {
 	// The watch collects; the phone does not.
 	s.Tick(at(reading, 3))
 	s.LinkOpened("WW", at(reading, 3), AdvertFull)
+	s.AdmitDisplay("WW", DisplayWatch, at(reading, 3), AdvertFull)
 	s.Served("WW", DisplayWatch, at(reading, 4))
 	s.LinkClosed(at(reading, 5))
 
 	expectModes(t, s, reading, map[float64]AdvertMode{
-		20: AdvertFull, 31: AdvertFull, 32.5: AdvertOff,
+		20: AdvertFull, 28: AdvertFull, 29.5: AdvertOff,
 		62.6: AdvertBare, 66: AdvertOff, 182.6: AdvertBare, 242.6: AdvertBare, 246: AdvertOff,
 	})
+	if got := s.LinkOpened("WW", at(reading, 63), AdvertBare); got != LinkUnanswered {
+		t.Errorf("watch connecting at a minute call: %s", got)
+	}
 	if s.AdmitDisplay("WW", DisplayWatch, at(reading, 63), AdvertBare) {
 		t.Error("watch admitted at a minute call")
 	}
 	if !s.AdmitDisplay("PP", DisplayPhone, at(reading, 63), AdvertBare) {
 		t.Error("phone refused at a minute call")
+	}
+}
+
+func TestMinuteCallsAdmitTheDisplayThatMissed(t *testing.T) {
+	s, act := newTestSensor(t)
+	reading := act.Add(2 * time.Hour)
+	s.state.Slots[DisplayPhone] = &Slot{Key: make([]byte, 16), LastSeen: reading.Add(-4 * time.Minute)}
+	s.state.Slots[DisplayWatch] = &Slot{Key: make([]byte, 16), LastSeen: reading.Add(-4 * time.Minute)}
+
+	// The phone collects; the watch does not.
+	s.Tick(at(reading, 3))
+	s.LinkOpened("PP", at(reading, 3), AdvertFull)
+	s.AdmitDisplay("PP", DisplayPhone, at(reading, 3), AdvertFull)
+	s.Served("PP", DisplayPhone, at(reading, 4))
+	s.LinkClosed(at(reading, 5))
+
+	expectModes(t, s, reading, map[float64]AdvertMode{62.6: AdvertBare, 66: AdvertOff})
+	if got := s.LinkOpened("PP", at(reading, 63), AdvertBare); got != LinkUnanswered {
+		t.Errorf("phone reconnecting at a minute call: %s", got)
+	}
+	if got := s.LinkOpened("WW", at(reading, 63), AdvertBare); got != LinkAccepted {
+		t.Errorf("watch connecting at a minute call: %s", got)
+	}
+	if !s.AdmitDisplay("WW", DisplayWatch, at(reading, 63), AdvertBare) {
+		t.Error("watch refused at a minute call")
 	}
 }
 

@@ -45,6 +45,7 @@ type SimRadio struct {
 	startAt  time.Time // a pending connect's start delay ends
 
 	missedWakes int // readings advertised with nothing lodged to wake the app
+	failedLinks []time.Time
 	held        *heldRequests
 	forceQuit   bool // the running app's end is a force-quit, not a termination
 
@@ -545,8 +546,8 @@ func (r *SimRadio) setNotify(c *simClient, msg map[string]interface{}) {
 
 // tryConnect brings up a pending connection once the sensor advertises, as
 // iOS completes a pending connect on the next advert it hears after the
-// connect's start delay. A link the sensor refuses stays pending, as a
-// refusal at the link layer does.
+// connect's start delay. A link the sensor refuses stays pending, as
+// bluetoothd retries it.
 func (r *SimRadio) tryConnect(now time.Time) {
 	r.mu.Lock()
 	c, mode := r.client, r.mode
@@ -557,7 +558,10 @@ func (r *SimRadio) tryConnect(now time.Time) {
 	r.tried = now
 	r.mu.Unlock()
 
-	if !r.sensor.LinkOpened(c.addr, now, mode) {
+	if answer := r.sensor.LinkOpened(c.addr, now, mode); answer != g7.LinkAccepted {
+		if answer == g7.LinkFailedToEstablish {
+			r.countFailedLink(now)
+		}
 		return
 	}
 	l := &simLink{radio: r, client: c, addr: c.addr, events: make(chan event, 256), notifying: map[g7.Char]string{}}
@@ -575,6 +579,23 @@ func (r *SimRadio) tryConnect(now time.Time) {
 	c.send(map[string]interface{}{"type": "didConnect", "id": r.id})
 	l.handler = g7.NewHandler(r.sensor, l, mode)
 	go l.run()
+}
+
+// countFailedLink keeps the tally bluetoothd keeps of links to this sensor
+// that failed to establish.
+func (r *SimRadio) countFailedLink(now time.Time) {
+	const window, limit = 5*time.Hour + 48*time.Minute, 5
+	r.mu.Lock()
+	recent := r.failedLinks[:0]
+	for _, t := range r.failedLinks {
+		if now.Sub(t) < window {
+			recent = append(recent, t)
+		}
+	}
+	r.failedLinks = append(recent, now)
+	n := len(r.failedLinks)
+	r.mu.Unlock()
+	log.Printf("POOR CONNECTION: %d failed links in %s; at %d watchOS connects to this sensor only above -70 dBm", n, window, limit)
 }
 
 func (r *SimRadio) Run() {

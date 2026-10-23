@@ -223,25 +223,32 @@ queue rather than the central's own (G7SensorKit asserts its queue, so Loop cras
 ## The advertising model
 
 From Jeremy Barnum's sniffer and scanner measurements of a real G7 (Loop
-`docs/G7_MUTE_INVESTIGATION_2026-09.md`, in git history at `b930fe17`). All values are
+`docs/G7_MUTE_INVESTIGATION_2026-09.md`, in git history at `b930fe17`), checked against an
+nRF sniffer following a real G7 with a phone and a watch in October 2026. All values are
 in `g7.MeasuredTiming()`.
 
 - A reading every 300 s from activation; the burst starts 2.5 s after it, adverts 160 ms apart.
 - Every held display collected: the burst ends at start + 7 s, or 1 s after the last link closes.
-- A held display missing, in its first two missed windows: start + 29 s, or 19 s after the last close.
+- A held display missing, in its first two missed windows: start + 26 s, or 19 s after the last close.
 - Missing for longer: start + 8 s. Nobody connected at all: 25 s.
-- While the phone's slot is held and it missed the current reading: bare adverts
-  (Flags `0x04` only) for 3 s at +60/120/180/240 s, admitting only the phone.
+- While any paired display missed the current reading: bare adverts (Flags `0x04` only)
+  for 3 s at +60/120/180/240 s, admitting any display that has not collected it. They go
+  on after the display's slot lapses from the types in use. A display that already
+  collected gets no answer to its connect request at a minute call: its controller gives
+  up after six empty connection events, and its host never hears of it.
 - A display slot stays held 15 min after it was last seen; held slots set the
   `1 << (type-1)` bits of the advertisement's types-in-use byte.
-- A client that collected this window is refused for the rest of it: by address the
-  moment its link comes up, and by display type at its challenge.
+- A client that collected this window is refused for the rest of it: by address at the
+  link layer (the sensor answers the connect request and the link fails to establish,
+  0x3E), and by display type at its challenge. watchOS counts these failures: five in
+  about 5.8 h and it connects to the sensor only above -70 dBm, until Bluetooth is
+  toggled. The `-simulator` radio leaves the connect pending, as bluetoothd retries it,
+  and logs a running count (`POOR CONNECTION`).
 - Four rejections in a row stop all advertising for 10 min.
 
-What the emulator cannot copy: the real sensor refuses a served client at the link
-layer (the central sees connection-failed-to-be-established, 0x3E). Here the link comes
+What the Pi cannot copy: BlueZ answers every connect request, so a refused link comes
 up and is closed within milliseconds, which iOS reports as a connect followed by a
-disconnect.
+disconnect; watchOS likely does not count that against the sensor.
 
 ## The protocol handler
 

@@ -16,7 +16,7 @@ type Timing struct {
 
 	// How long a burst lasts, measured from its first advert.
 	ServedBurst   time.Duration // every expected display collected: ~7 s
-	ExtendedBurst time.Duration // an expected display missing, its first two windows: ~29 s
+	ExtendedBurst time.Duration // an expected display missing, its first two windows: ~26 s
 	LateBurst     time.Duration // an expected display missing for longer: ~8 s
 	EmptyBurst    time.Duration // nobody connected: ~25 s
 
@@ -26,8 +26,10 @@ type Timing struct {
 	ServedTailAfterClose   time.Duration
 	ExtendedWindows        int
 
-	// While the phone misses readings, bare adverts at +60/120/180/240 s that
-	// admit only the phone.
+	// While a paired display misses a reading, bare adverts at +60/120/180/240 s
+	// that admit any display that has not collected it. They go on after the
+	// display's slot lapses from the types in use (40 min and more on a real
+	// G7, October 2026).
 	MinuteCallLength time.Duration
 
 	AdvertisingInterval time.Duration // ~160 ms between adverts
@@ -45,7 +47,7 @@ func MeasuredTiming() Timing {
 		ReadingInterval:        300 * time.Second,
 		BurstDelay:             2500 * time.Millisecond,
 		ServedBurst:            7 * time.Second,
-		ExtendedBurst:          29 * time.Second,
+		ExtendedBurst:          26 * time.Second,
 		LateBurst:              8 * time.Second,
 		EmptyBurst:             25 * time.Second,
 		ExtendedTailAfterClose: 19 * time.Second,
@@ -113,7 +115,6 @@ type Sensor struct {
 	win         *window
 	rejections  int
 	lockedUntil time.Time
-	addrTypes   map[string]byte // display type each address last authenticated as
 }
 
 func NewSensor(state *State, path string, timing Timing) *Sensor {
@@ -121,11 +122,10 @@ func NewSensor(state *State, path string, timing Timing) *Sensor {
 		state.Identity = NewSensorIdentity(state.Serial)
 	}
 	s := &Sensor{
-		Timing:    timing,
-		state:     state,
-		path:      path,
-		glucose:   NewGlucoseModel(state),
-		addrTypes: map[string]byte{},
+		Timing:  timing,
+		state:   state,
+		path:    path,
+		glucose: NewGlucoseModel(state),
 	}
 	s.fillReadings(time.Now())
 	return s
@@ -220,7 +220,7 @@ func (s *Sensor) Tick(now time.Time) AdvertMode {
 	if now.Before(s.burstEnd(now)) {
 		return AdvertFull
 	}
-	if s.phoneMissing(now) {
+	if s.displayMissing() {
 		offset := now.Sub(w.start)
 		for m := 1; m <= 4; m++ {
 			call := time.Duration(m) * time.Minute
@@ -287,9 +287,13 @@ func (s *Sensor) burstEnd(now time.Time) time.Time {
 	}
 }
 
-func (s *Sensor) phoneMissing(now time.Time) bool {
-	slot := s.state.Slots[DisplayPhone]
-	return s.isHeld(slot, now) && !s.win.servedTypes[DisplayPhone]
+func (s *Sensor) displayMissing() bool {
+	for t := range s.state.Slots {
+		if !s.win.servedTypes[t] {
+			return true
+		}
+	}
+	return false
 }
 
 // TypesInUse is the advertisement's byte of display types holding a slot.
@@ -306,28 +310,45 @@ func (s *Sensor) TypesInUse() byte {
 	return b
 }
 
-// LinkOpened decides whether the controller should keep a new link. A
-// client already served this window is dropped at once, as the sensor does;
-// during the minute calls only the phone gets in.
-func (s *Sensor) LinkOpened(addr string, now time.Time, mode AdvertMode) bool {
+// LinkAnswer is how the sensor's controller takes a connect request.
+type LinkAnswer int
+
+const (
+	LinkAccepted LinkAnswer = iota
+	// The connect request is never answered: the central polls the first
+	// connection events, gets nothing and gives up in its controller. The host
+	// never sees a link. A real G7 does this at a minute call to a display
+	// that already collected the reading.
+	LinkUnanswered
+	// The sensor answers the connect request and the link fails before it is
+	// established. A real G7 does this to a display that already collected the
+	// reading. watchOS counts each one against the sensor: at five in about
+	// 5.8 h it connects only above -70 dBm until Bluetooth is toggled.
+	LinkFailedToEstablish
+)
+
+func (a LinkAnswer) String() string {
+	return [...]string{"accepted", "unanswered", "failed to establish"}[a]
+}
+
+// LinkOpened decides how the controller takes a new connect request.
+func (s *Sensor) LinkOpened(addr string, now time.Time, mode AdvertMode) LinkAnswer {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.win == nil {
-		return false
+		return LinkUnanswered
 	}
 	if s.win.servedAddrs[addr] {
-		log.Printf("%s: already served reading %d; dropping the link", addr, s.win.index)
-		return false
-	}
-	if mode == AdvertBare {
-		if t, ok := s.addrTypes[addr]; ok && t != DisplayPhone {
-			log.Printf("%s: display type %d at a minute call; only the phone is admitted", addr, t)
-			return false
+		if mode == AdvertBare {
+			log.Printf("%s: already served reading %d; not answering at a minute call", addr, s.win.index)
+			return LinkUnanswered
 		}
+		log.Printf("%s: already served reading %d; the link fails to establish", addr, s.win.index)
+		return LinkFailedToEstablish
 	}
 	s.win.anyLink = true
 	s.win.openLinks++
-	return true
+	return LinkAccepted
 }
 
 func (s *Sensor) LinkClosed(now time.Time) {
@@ -347,13 +368,8 @@ func (s *Sensor) LinkClosed(now time.Time) {
 func (s *Sensor) AdmitDisplay(addr string, displayType byte, now time.Time, mode AdvertMode) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.addrTypes[addr] = displayType
 	if s.win != nil && s.win.servedTypes[displayType] {
 		log.Printf("%s: display type %d already collected reading %d; dropping", addr, displayType, s.win.index)
-		return false
-	}
-	if mode == AdvertBare && displayType != DisplayPhone {
-		log.Printf("%s: display type %d at a minute call; dropping", addr, displayType)
 		return false
 	}
 	return true
